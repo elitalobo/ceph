@@ -84,7 +84,7 @@ public:
 
   int minimum_to_decode(const set<int> &want_to_read,
 				const set<int> &available_chunks,
-				set<int> *minimum) override;
+				set<int> *minimum);
 
   int minimum_to_decode_with_cost(const set<int> &want_to_read,
 					  const map<int, int> &available,
@@ -98,7 +98,7 @@ public:
 
   int decode(const set<int> &want_to_read,
 		     const map<int, bufferlist> &chunks,
-		     map<int, bufferlist> *decoded) override;
+		     map<int, bufferlist> *decoded);
   int decode_chunks(const set<int> &want_to_read,
 			    const map<int, bufferlist> &chunks,
 			    map<int, bufferlist> *decoded) override;
