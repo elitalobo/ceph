@@ -38,7 +38,6 @@ class SafeTimer;
 
 namespace librbd {
 
-  class AsyncOperation;
   template <typename> class ExclusiveLock;
   template <typename> class ImageState;
   template <typename> class ImageWatcher;
@@ -52,7 +51,8 @@ namespace librbd {
   namespace exclusive_lock { struct Policy; }
   namespace io {
   class AioCompletion;
-  class ImageRequestWQ;
+  class AsyncOperation;
+  template <typename> class ImageRequestWQ;
   class CopyupRequest;
   }
   namespace journal { struct Policy; }
@@ -128,6 +128,7 @@ namespace librbd {
     cls::rbd::GroupSpec group_spec;
     uint64_t stripe_unit, stripe_count;
     uint64_t flags;
+    utime_t create_timestamp;
 
     file_layout_t layout;
 
@@ -141,7 +142,7 @@ namespace librbd {
 
     std::map<uint64_t, io::CopyupRequest*> copyup_list;
 
-    xlist<AsyncOperation*> async_ops;
+    xlist<io::AsyncOperation*> async_ops;
     xlist<AsyncRequest<>*> async_requests;
     std::list<Context*> async_requests_waiters;
 
@@ -153,7 +154,7 @@ namespace librbd {
 
     xlist<operation::ResizeRequest<ImageCtx>*> resize_reqs;
 
-    io::ImageRequestWQ *io_work_queue;
+    io::ImageRequestWQ<ImageCtx> *io_work_queue;
     xlist<io::AioCompletion*> completed_reqs;
     EventSocket event_socket;
 
@@ -254,6 +255,7 @@ namespace librbd {
     uint64_t get_stripe_unit() const;
     uint64_t get_stripe_count() const;
     uint64_t get_stripe_period() const;
+    utime_t get_create_timestamp() const;
 
     void add_snap(cls::rbd::SnapshotNamespace in_snap_namespace,
 		  std::string in_snap_name,
@@ -269,8 +271,9 @@ namespace librbd {
     bool test_features(uint64_t test_features,
                        const RWLock &in_snap_lock) const;
     int get_flags(librados::snap_t in_snap_id, uint64_t *flags) const;
-    bool test_flags(uint64_t test_flags) const;
-    bool test_flags(uint64_t test_flags, const RWLock &in_snap_lock) const;
+    int test_flags(uint64_t test_flags, bool *flags_set) const;
+    int test_flags(uint64_t test_flags, const RWLock &in_snap_lock,
+                   bool *flags_set) const;
     int update_flags(librados::snap_t in_snap_id, uint64_t flag, bool enabled);
 
     const ParentInfo* get_parent_info(librados::snap_t in_snap_id) const;

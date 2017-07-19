@@ -15,6 +15,7 @@
 #ifndef CEPH_LOGCLIENT_H
 #define CEPH_LOGCLIENT_H
 
+#include <atomic>
 #include "common/LogEntry.h"
 #include "common/Mutex.h"
 
@@ -231,6 +232,7 @@ public:
 
   uint64_t get_next_seq();
   const entity_inst_t& get_myinst();
+  const EntityName& get_myname();
   version_t queue(LogEntry &entry);
 
 private:

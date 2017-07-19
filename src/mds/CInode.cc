@@ -339,11 +339,16 @@ void CInode::mark_dirty_rstat()
     dout(10) << "mark_dirty_rstat" << dendl;
     state_set(STATE_DIRTYRSTAT);
     get(PIN_DIRTYRSTAT);
-    CDentry *dn = get_projected_parent_dn();
-    CDir *pdir = dn->dir;
-    pdir->dirty_rstat_inodes.push_back(&dirty_rstat_item);
-
-    mdcache->mds->locker->mark_updated_scatterlock(&pdir->inode->nestlock);
+    CDentry *pdn = get_projected_parent_dn();
+    if (pdn->is_auth()) {
+      CDir *pdir = pdn->dir;
+      pdir->dirty_rstat_inodes.push_back(&dirty_rstat_item);
+      mdcache->mds->locker->mark_updated_scatterlock(&pdir->inode->nestlock);
+    } else {
+      // under cross-MDS rename.
+      // DIRTYRSTAT flag will get cleared when rename finishes
+      assert(state_test(STATE_AMBIGUOUSAUTH));
+    }
   }
 }
 void CInode::clear_dirty_rstat()
@@ -4429,10 +4434,12 @@ void CInode::maybe_export_pin(bool update)
       continue;
     if (export_pin != MDS_RANK_NONE) {
       if (dir->is_subtree_root()) {
-	// export subtrees ?
-	queue = (export_pin != dir->get_dir_auth().first);
+	// set auxsubtree bit or export it
+	if (!dir->state_test(CDir::STATE_AUXSUBTREE) ||
+	    export_pin != dir->get_dir_auth().first)
+	  queue = true;
       } else {
-	// create aux subtrees
+	// create aux subtree or export it
 	queue = true;
       }
     } else {

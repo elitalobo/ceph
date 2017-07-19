@@ -14,6 +14,7 @@
 
 #include <sstream>
 #include <boost/utility.hpp>
+#include <boost/regex.hpp>
 
 #include "MDSMonitor.h"
 #include "FSCommands.h"
@@ -99,6 +100,8 @@ void MDSMonitor::update_from_paxos(bool *need_bootstrap)
 	   << ", my e " << fsmap.epoch << dendl;
   assert(version > fsmap.epoch);
 
+  load_health();
+
   // read and decode
   bufferlist fsmap_bl;
   fsmap_bl.clear();
@@ -174,6 +177,65 @@ void MDSMonitor::encode_pending(MonitorDBStore::TransactionRef t)
   }
   pending_daemon_health_rm.clear();
   remove_from_metadata(t);
+
+  // health
+  health_check_map_t new_checks;
+  const auto info_map = pending_fsmap.get_mds_info();
+  for (const auto &i : info_map) {
+    const auto &gid = i.first;
+    const auto &info = i.second;
+    if (pending_daemon_health_rm.count(gid)) {
+      continue;
+    }
+    MDSHealth health;
+    auto p = pending_daemon_health.find(gid);
+    if (p != pending_daemon_health.end()) {
+      health = p->second;
+    } else {
+      bufferlist bl;
+      mon->store->get(MDS_HEALTH_PREFIX, stringify(gid), bl);
+      if (!bl.length()) {
+	derr << "Missing health data for MDS " << gid << dendl;
+	continue;
+      }
+      bufferlist::iterator bl_i = bl.begin();
+      health.decode(bl_i);
+    }
+    for (const auto &metric : health.metrics) {
+      int const rank = info.rank;
+      health_check_t *check = &new_checks.get_or_add(
+	mds_metric_name(metric.type),
+	metric.sev,
+	mds_metric_summary(metric.type));
+      ostringstream ss;
+      ss << "mds" << info.name << "(mds." << rank << "): " << metric.message;
+      for (auto p = metric.metadata.begin();
+	   p != metric.metadata.end();
+	   ++p) {
+	if (p != metric.metadata.begin()) {
+	  ss << ", ";
+	}
+	ss << p->first << ": " << p->second;
+      }
+      check->detail.push_back(ss.str());
+    }
+  }
+  pending_fsmap.get_health_checks(&new_checks);
+  for (auto& p : new_checks.checks) {
+    p.second.summary = boost::regex_replace(
+      p.second.summary,
+      boost::regex("%num%"),
+      stringify(p.second.detail.size()));
+    p.second.summary = boost::regex_replace(
+      p.second.summary,
+      boost::regex("%plurals%"),
+      p.second.detail.size() > 1 ? "s" : "");
+    p.second.summary = boost::regex_replace(
+      p.second.summary,
+      boost::regex("%isorare%"),
+      p.second.detail.size() > 1 ? "are" : "is");
+  }
+  encode_health(new_checks, t);
 }
 
 version_t MDSMonitor::get_trim_to()
@@ -503,6 +565,7 @@ bool MDSMonitor::prepare_beacon(MonOpRequestRef op)
           mon->osdmon()->wait_for_writeable(op, new C_RetryMessage(this, op));
           return false;
         }
+        mon->clog->info() << "MDS daemon '" << m->get_name() << "' restarted";
 	fail_mds_gid(existing);
         failed_mds = true;
       }
@@ -740,8 +803,9 @@ void MDSMonitor::on_active()
   tick();
   update_logger();
 
-  if (mon->is_leader())
-    mon->clog->info() << "fsmap " << fsmap;
+  if (mon->is_leader()) {
+    mon->clog->debug() << "fsmap " << fsmap;
+  }
 }
 
 void MDSMonitor::get_health(list<pair<health_status_t, string> >& summary,
@@ -969,6 +1033,20 @@ bool MDSMonitor::preprocess_command(MonOpRequestRef op)
       f->close_section();
     }
     f->flush(ds);
+  } else if (prefix == "mds versions") {
+    if (!f)
+      f.reset(Formatter::create("json-pretty"));
+    count_metadata("ceph_version", f.get());
+    f->flush(ds);
+    r = 0;
+  } else if (prefix == "mds count-metadata") {
+    if (!f)
+      f.reset(Formatter::create("json-pretty"));
+    string field;
+    cmd_getval(g_ceph_context, cmdmap, "property", field);
+    count_metadata(field, f.get());
+    f->flush(ds);
+    r = 0;
   } else if (prefix == "mds getmap") {
     epoch_t e;
     int64_t epocharg;
@@ -1071,9 +1149,8 @@ bool MDSMonitor::preprocess_command(MonOpRequestRef op)
         
         ds << "name: " << mds_map.fs_name << ", metadata pool: "
            << md_pool_name << ", data pools: [";
-        for (std::set<int64_t>::iterator dpi = mds_map.data_pools.begin();
-           dpi != mds_map.data_pools.end(); ++dpi) {
-          const string &pool_name = mon->osdmon()->osdmap.get_pool_name(*dpi);
+        for (auto dpi : mds_map.data_pools) {
+          const string &pool_name = mon->osdmon()->osdmap.get_pool_name(dpi);
           ds << pool_name << " ";
         }
         ds << "]" << std::endl;
@@ -1775,6 +1852,26 @@ int MDSMonitor::load_metadata(map<mds_gid_t, Metadata>& m)
   return 0;
 }
 
+void MDSMonitor::count_metadata(const string& field, Formatter *f)
+{
+  map<string,int> by_val;
+  map<mds_gid_t,Metadata> meta;
+  load_metadata(meta);
+  for (auto& p : meta) {
+    auto q = p.second.find(field);
+    if (q == p.second.end()) {
+      by_val["unknown"]++;
+    } else {
+      by_val[q->second]++;
+    }
+  }
+  f->open_object_section(field.c_str());
+  for (auto& p : by_val) {
+    f->dump_int(p.first.c_str(), p.second);
+  }
+  f->close_section();
+}
+
 int MDSMonitor::dump_metadata(const std::string &who, Formatter *f, ostream& err)
 {
   assert(f);
@@ -1887,12 +1984,24 @@ void MDSMonitor::maybe_replace_gid(mds_gid_t gid,
     << " " << ceph_mds_state_name(info.state)
     << " since " << beacon.stamp << dendl;
 
+  // We will only take decisive action (replacing/removing a daemon)
+  // if we have some indicating that some other daemon(s) are successfully
+  // getting beacons through recently.
+  utime_t latest_beacon;
+  for (const auto & i : last_beacon) {
+    latest_beacon = MAX(i.second.stamp, latest_beacon);
+  }
+  const bool may_replace = latest_beacon >
+    (ceph_clock_now() -
+     MAX(g_conf->mds_beacon_interval, g_conf->mds_beacon_grace * 0.5));
+
   // are we in?
   // and is there a non-laggy standby that can take over for us?
   mds_gid_t sgid;
   if (info.rank >= 0 &&
       info.state != MDSMap::STATE_STANDBY &&
       info.state != MDSMap::STATE_STANDBY_REPLAY &&
+      may_replace &&
       !pending_fsmap.get_filesystem(fscid)->mds_map.test_flag(CEPH_MDSMAP_DOWN) &&
       (sgid = pending_fsmap.find_replacement_for({fscid, info.rank}, info.name,
                 g_conf->mon_force_standby_active)) != MDS_GID_NONE)
@@ -1903,6 +2012,11 @@ void MDSMonitor::maybe_replace_gid(mds_gid_t gid,
       << info.rank << "." << info.inc
       << " " << ceph_mds_state_name(info.state)
       << " with " << sgid << "/" << si.name << " " << si.addr << dendl;
+
+    mon->clog->warn() << "MDS daemon '" << info.name << "'"
+                      << " is not responding, replacing it "
+                      << "as rank " << info.rank
+                      << " with standby '" << si.name << "'";
 
     // Remember what NS the old one was in
     const fs_cluster_id_t fscid = pending_fsmap.mds_roles.at(gid);
@@ -1915,11 +2029,14 @@ void MDSMonitor::maybe_replace_gid(mds_gid_t gid,
     pending_fsmap.promote(sgid, fs, info.rank);
 
     *mds_propose = true;
-  } else if (info.state == MDSMap::STATE_STANDBY_REPLAY || 
-             info.state == MDSMap::STATE_STANDBY) {
+  } else if ((info.state == MDSMap::STATE_STANDBY_REPLAY ||
+             info.state == MDSMap::STATE_STANDBY) && may_replace) {
     dout(10) << " failing and removing " << gid << " " << info.addr << " mds." << info.rank 
       << "." << info.inc << " " << ceph_mds_state_name(info.state)
       << dendl;
+    mon->clog->info() << "MDS standby '"  << info.name
+                      << "' is not responding, removing it from the set of "
+                      << "standbys";
     fail_mds_gid(gid);
     *mds_propose = true;
   } else if (!info.laggy()) {

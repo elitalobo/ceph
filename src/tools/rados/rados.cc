@@ -83,7 +83,7 @@ void usage(ostream& out)
 "OBJECT COMMANDS\n"
 "   get <obj-name> [outfile]         fetch object\n"
 "   put <obj-name> [infile] [--offset offset]\n"
-"                                    write object write object start offset(default:0)\n"
+"                                    write object with start offset (default:0)\n"
 "   append <obj-name> [infile]       append object\n"
 "   truncate <obj-name> length       truncate object\n"
 "   create <obj-name>                create object\n"
@@ -2030,7 +2030,7 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
       tab.define_column("COPIES", TextTable::LEFT, TextTable::RIGHT);
       tab.define_column("MISSING_ON_PRIMARY", TextTable::LEFT, TextTable::RIGHT);
       tab.define_column("UNFOUND", TextTable::LEFT, TextTable::RIGHT);
-      tab.define_column("DEGRAED", TextTable::LEFT, TextTable::RIGHT);
+      tab.define_column("DEGRADED", TextTable::LEFT, TextTable::RIGHT);
       tab.define_column("RD_OPS", TextTable::LEFT, TextTable::RIGHT);
       tab.define_column("RD", TextTable::LEFT, TextTable::RIGHT);
       tab.define_column("WR_OPS", TextTable::LEFT, TextTable::RIGHT);
@@ -2960,7 +2960,7 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
       usage_exit();
     if (operation != OP_WRITE) {
       if (block_size_specified) {
-        cerr << "-b|--block_size option can be used only with `write' bench test"
+        cerr << "-b|--block_size option can be used only with 'write' bench test"
              << std::endl;
         ret = -EINVAL;
         goto out;
@@ -2978,7 +2978,7 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
     }
 
     if (!formatter && output) {
-      cerr << "-o|--output option can be used only with '--format' option"
+      cerr << "-o|--output option can only be used with '--format' option"
            << std::endl;
       ret = -EINVAL;
       goto out;
@@ -3005,7 +3005,7 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
 			    concurrent_ios, op_size, object_size,
 			    max_objects, cleanup, hints, run_name, no_verify);
     if (ret != 0)
-      cerr << "error during benchmark: " << ret << std::endl;
+      cerr << "error during benchmark: " << cpp_strerror(ret) << std::endl;
     if (formatter && output)
       delete outstream;
   }
@@ -3017,7 +3017,7 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
     RadosBencher bencher(g_ceph_context, rados, io_ctx);
     ret = bencher.clean_up(prefix, concurrent_ios, run_name);
     if (ret != 0)
-      cerr << "error during cleanup: " << ret << std::endl;
+      cerr << "error during cleanup: " << cpp_strerror(ret) << std::endl;
   }
   else if (strcmp(nargs[0], "watch") == 0) {
     if (!pool_name || nargs.size() < 2)
@@ -3027,7 +3027,7 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
     uint64_t cookie;
     ret = io_ctx.watch2(oid, &cookie, &ctx);
     if (ret != 0)
-      cerr << "error calling watch: " << ret << std::endl;
+      cerr << "error calling watch: " << cpp_strerror(ret) << std::endl;
     else {
       cout << "press enter to exit..." << std::endl;
       getchar();
@@ -3044,7 +3044,7 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
     ::encode(msg, bl);
     ret = io_ctx.notify2(oid, bl, 10000, &replybl);
     if (ret != 0)
-      cerr << "error calling notify: " << ret << std::endl;
+      cerr << "error calling notify: " << cpp_strerror(ret) << std::endl;
     if (replybl.length()) {
       map<pair<uint64_t,uint64_t>,bufferlist> rm;
       set<pair<uint64_t,uint64_t> > missed;
@@ -3420,6 +3420,42 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
     if (ret < 0) {
       cerr << "error from cache-try-flush-evict-all: "
 	   << cpp_strerror(ret) << std::endl;
+      goto out;
+    }
+  } else if (strcmp(nargs[0], "set-redirect") == 0) {
+    if (!pool_name)
+      usage_exit();
+
+    const char *target = target_pool_name;
+    if (!target)
+      target = pool_name;
+
+    const char *target_obj;
+    if (nargs.size() < 3) {
+      if (strcmp(target, pool_name) == 0) {
+        cerr << "cannot copy object into itself" << std::endl;
+	ret = -1;
+	goto out;
+      }
+      target_obj = nargs[1];
+    } else {
+      target_obj = nargs[2];
+    }
+
+    IoCtx target_ctx;
+    ret = rados.ioctx_create(target, target_ctx);
+    if (target_oloc.size()) {
+      target_ctx.locator_set_key(target_oloc);
+    }
+    if (target_nspace.size()) {
+      target_ctx.set_namespace(target_nspace);
+    }
+
+    ObjectWriteOperation op;
+    op.set_redirect(target_obj, target_ctx, 0);
+    ret = io_ctx.operate(nargs[1], &op);
+    if (ret < 0) {
+      cerr << "error set-redirect " << pool_name << "/" << nargs[1] << " => " << target << "/" << target_obj << ": " << cpp_strerror(ret) << std::endl;
       goto out;
     }
   } else if (strcmp(nargs[0], "export") == 0) {

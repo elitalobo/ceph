@@ -31,7 +31,8 @@ from mgr_module import MgrModule, CommandResult
 from types import OsdMap, NotFound, Config, FsMap, MonMap, \
     PgSummary, Health, MonStatus
 
-from rbd_ls import RbdLs
+import rados
+from rbd_ls import RbdLs, RbdPoolLs
 from cephfs_clients import CephFSClients
 
 
@@ -41,6 +42,12 @@ log = logging.getLogger("dashboard")
 # How many cluster log lines shall we hold onto in our
 # python module for the convenience of the GUI?
 LOG_BUFFER_SIZE = 30
+
+# cherrypy likes to sys.exit on error.  don't let it take us down too!
+def os_exit_noop():
+    pass
+
+os._exit = os_exit_noop
 
 
 def recurse_refs(root, path):
@@ -61,11 +68,20 @@ class Module(MgrModule):
         self.log.info("Constructing module {0}: instance {1}".format(
             __name__, _global_instance))
 
+        self.log_primed = False
         self.log_buffer = collections.deque(maxlen=LOG_BUFFER_SIZE)
+        self.audit_buffer = collections.deque(maxlen=LOG_BUFFER_SIZE)
+
+        # Keep a librados instance for those that need it.
+        self._rados = None
 
         # Stateful instances of RbdLs, hold cached results.  Key to dict
         # is pool name.
         self.rbd_ls = {}
+
+        # Stateful instance of RbdPoolLs, hold cached list of RBD
+        # pools
+        self.rbd_pool_ls = RbdPoolLs(self)
 
         # Stateful instances of CephFSClients, hold cached results.  Key to
         # dict is FSCID
@@ -74,6 +90,22 @@ class Module(MgrModule):
         # A short history of pool df stats
         self.pool_stats = defaultdict(lambda: defaultdict(
             lambda: collections.deque(maxlen=10)))
+
+    @property
+    def rados(self):
+        """
+        A librados instance to be shared by any classes within
+        this mgr module that want one.
+        """
+        if self._rados:
+            return self._rados
+
+        from mgr_module import ceph_state
+        ctx_capsule = ceph_state.get_context()
+        self._rados = rados.Rados(context=ctx_capsule)
+        self._rados.connect()
+
+        return self._rados
 
     def update_pool_stats(self):
         df = global_instance().get("df")
@@ -85,9 +117,13 @@ class Module(MgrModule):
 
     def notify(self, notify_type, notify_val):
         if notify_type == "clog":
-            log.info("clog: {0}".format(notify_val["message"]))
-            log.info("clog: {0}".format(json.dumps(notify_val)))
-            self.log_buffer.appendleft(notify_val)
+            # Only store log messages once we've done our initial load,
+            # so that we don't end up duplicating.
+            if self.log_primed:
+                if notify_val['channel'] == "audit":
+                    self.audit_buffer.appendleft(notify_val)
+                else:
+                    self.log_buffer.appendleft(notify_val)
         elif notify_type == "pg_summary":
             self.update_pool_stats()
         else:
@@ -103,26 +139,26 @@ class Module(MgrModule):
             data['crush'] = self.get("osd_map_crush")
             data['crush_map_text'] = self.get("osd_map_crush_map_text")
             data['osd_metadata'] = self.get("osd_metadata")
-            obj = OsdMap(data['epoch'], data)
+            obj = OsdMap(data)
         elif object_type == Config:
             data = self.get("config")
-            obj = Config(0, data)
+            obj = Config( data)
         elif object_type == MonMap:
             data = self.get("mon_map")
-            obj = MonMap(data['epoch'], data)
+            obj = MonMap(data)
         elif object_type == FsMap:
             data = self.get("fs_map")
-            obj = FsMap(data['epoch'], data)
+            obj = FsMap(data)
         elif object_type == PgSummary:
             data = self.get("pg_summary")
             self.log.debug("JSON: {0}".format(data))
-            obj = PgSummary(0, data)
+            obj = PgSummary(data)
         elif object_type == Health:
             data = self.get("health")
-            obj = Health(0, json.loads(data['json']))
+            obj = Health(json.loads(data['json']))
         elif object_type == MonStatus:
             data = self.get("mon_status")
-            obj = MonStatus(0, json.loads(data['json']))
+            obj = MonStatus(json.loads(data['json']))
         else:
             raise NotImplementedError(object_type)
 
@@ -144,6 +180,11 @@ class Module(MgrModule):
         log.info("Stopping server...")
         cherrypy.engine.exit()
         log.info("Stopped server")
+
+        log.info("Stopping librados...")
+        if self._rados:
+            self._rados.shutdown()
+        log.info("Stopped librados.")
 
     def get_latest(self, daemon_type, daemon_name, stat):
         data = self.get_counter(daemon_type, daemon_name, stat)[stat]
@@ -340,11 +381,63 @@ class Module(MgrModule):
         jinja_loader = jinja2.FileSystemLoader(current_dir)
         env = jinja2.Environment(loader=jinja_loader)
 
-        class Root(object):
+        result = CommandResult("")
+        self.send_command(result, "mon", "", json.dumps({
+            "prefix":"log last",
+            "format": "json"
+            }), "")
+        r, outb, outs = result.wait()
+        if r != 0:
+            # Oh well.  We won't let this stop us though.
+            self.log.error("Error fetching log history (r={0}, \"{1}\")".format(
+                r, outs))
+        else:
+            try:
+                lines = json.loads(outb)
+            except ValueError:
+                self.log.error("Error decoding log history")
+            else:
+                for l in lines:
+                    if l['channel'] == 'audit':
+                        self.audit_buffer.appendleft(l)
+                    else:
+                        self.log_buffer.appendleft(l)
+
+        self.log_primed = True
+
+        class EndPoint(object):
+            def _health_data(self):
+                health = global_instance().get_sync_object(Health).data
+                # Transform the `checks` dict into a list for the convenience
+                # of rendering from javascript.
+                checks = []
+                for k, v in health['checks'].iteritems():
+                    v['type'] = k
+                    checks.append(v)
+
+                checks = sorted(checks, cmp=lambda a, b: a['severity'] > b['severity'])
+
+                health['checks'] = checks
+
+                return health
+
             def _toplevel_data(self):
                 """
                 Data consumed by the base.html template
                 """
+                status, data = global_instance().rbd_pool_ls.get()
+                if data is None:
+                    log.warning("Failed to get RBD pool list")
+                    data = []
+
+                rbd_pools = sorted([
+                    {
+                        "name": name,
+                        "url": "/rbd/{0}/".format(name)
+                    }
+                    for name in data
+                ], key=lambda k: k['name'])
+
                 fsmap = global_instance().get_sync_object(FsMap)
                 filesystems = [
                     {
@@ -356,10 +449,12 @@ class Module(MgrModule):
                 ]
 
                 return {
-                    'health': global_instance().get_sync_object(Health).data,
+                    'rbd_pools': rbd_pools,
+                    'health_status': self._health_data()['status'],
                     'filesystems': filesystems
                 }
 
+        class Root(EndPoint):
             @cherrypy.expose
             def filesystem(self, fs_id):
                 template = env.get_template("filesystem.html")
@@ -381,57 +476,6 @@ class Module(MgrModule):
             def filesystem_data(self, fs_id):
                 return global_instance().fs_status(int(fs_id))
 
-            def _osd(self, osd_id):
-                #global_instance().fs_status(int(fs_id))
-                osd_id = int(osd_id)
-
-                osd_map = global_instance().get("osd_map")
-
-                osd = None
-                for o in osd_map['osds']:
-                    if o['osd'] == osd_id:
-                        osd = o
-                        break
-
-                assert osd is not None  # TODO 400
-
-                osd_spec = "{0}".format(osd_id) 
-
-                osd_metadata = global_instance().get_metadata(
-                        "osd", osd_spec)
-
-                result = CommandResult("")
-                global_instance().send_command(result, "osd", osd_spec,
-                       json.dumps({
-                           "prefix": "perf histogram dump",
-                           }),
-                       "")
-                r, outb, outs = result.wait()
-                assert r == 0
-                histogram = json.loads(outb)
-
-                return {
-                    "osd": osd,
-                    "osd_metadata": osd_metadata,
-                    "osd_histogram": histogram
-                }
-
-            @cherrypy.expose
-            def osd_perf(self, osd_id):
-                template = env.get_template("osd_perf.html")
-                toplevel_data = self._toplevel_data()
-
-                return template.render(
-                    ceph_version=global_instance().version,
-                    toplevel_data=json.dumps(toplevel_data, indent=2),
-                    content_data=json.dumps(self._osd(osd_id), indent=2)
-                )
-
-            @cherrypy.expose
-            @cherrypy.tools.json_out()
-            def osd_perf_data(self, osd_id):
-                return self._osd(osd_id)
-
             def _clients(self, fs_id):
                 cephfs_clients = global_instance().cephfs_clients.get(fs_id, None)
                 if cephfs_clients is None:
@@ -451,7 +495,7 @@ class Module(MgrModule):
                         client['hostname'] = client['client_metadata']['hostname']
                     elif "kernel_version" in client['client_metadata']:
                         client['type'] = "kernel"
-                        client['version'] = client['kernel_version']
+                        client['version'] = client['client_metadata']['kernel_version']
                         client['hostname'] = client['client_metadata']['hostname']
                     else:
                         client['type'] = "unknown"
@@ -461,21 +505,36 @@ class Module(MgrModule):
                 return clients
 
             @cherrypy.expose
-            def clients(self, fs_id):
-                template = env.get_template("clients.html")
+            def clients(self, fscid_str):
+                try:
+                    fscid = int(fscid_str)
+                except ValueError:
+                    raise cherrypy.HTTPError(400,
+                        "Invalid filesystem id {0}".format(fscid_str))
 
-                toplevel_data = self._toplevel_data()
+                try:
+                    fs_name = FsMap(global_instance().get(
+                        "fs_map")).get_filesystem(fscid)['mdsmap']['fs_name']
+                except NotFound:
+                    log.warning("Missing FSCID, dumping fsmap:\n{0}".format(
+                        json.dumps(global_instance().get("fs_map"), indent=2)
+                    ))
+                    raise cherrypy.HTTPError(404,
+                                             "No filesystem with id {0}".format(fscid))
 
-                clients = self._clients(int(fs_id))
+                clients = self._clients(fscid)
                 global_instance().log.debug(json.dumps(clients, indent=2))
                 content_data = {
                     "clients": clients,
-                    "fscid": fs_id
+                    "fs_name": fs_name,
+                    "fscid": fscid,
+                    "fs_url": "/filesystem/" + fscid_str + "/"
                 }
 
+                template = env.get_template("clients.html")
                 return template.render(
                     ceph_version=global_instance().version,
-                    toplevel_data=json.dumps(toplevel_data, indent=2),
+                    toplevel_data=json.dumps(self._toplevel_data(), indent=2),
                     content_data=json.dumps(content_data, indent=2)
                 )
 
@@ -572,7 +631,7 @@ class Module(MgrModule):
 
                     def get_rate(series):
                         if len(series) >= 2:
-                            return (series[0][1] - series[1][1]) / float(series[0][0] - series[1][0])
+                            return (float(series[0][1]) - float(series[1][1])) / (float(series[0][0]) - float(series[1][0]))
                         else:
                             return 0
 
@@ -589,13 +648,21 @@ class Module(MgrModule):
                 # to UI
                 del osd_map['pg_temp']
 
+                df = global_instance().get("df")
+                df['stats']['total_objects'] = sum(
+                    [p['stats']['objects'] for p in df['pools']])
+
                 return {
-                    "health": global_instance().get_sync_object(Health).data,
+                    "health": self._health_data(),
                     "mon_status": global_instance().get_sync_object(
                         MonStatus).data,
+                    "fs_map": global_instance().get_sync_object(FsMap).data,
                     "osd_map": osd_map,
                     "clog": list(global_instance().log_buffer),
-                    "pools": pools
+                    "audit_log": list(global_instance().audit_buffer),
+                    "pools": pools,
+                    "mgr_map": global_instance().get("mgr_map"),
+                    "df": df
                 }
 
             @cherrypy.expose
@@ -663,8 +730,10 @@ class Module(MgrModule):
 
                 return dict(result)
 
-        server_addr = self.get_config('server_addr') or '127.0.0.1'
-        server_port = self.get_config('server_port') or '7000'
+        server_addr = self.get_localized_config('server_addr', '::')
+        server_port = self.get_localized_config('server_port', '7000')
+        if server_addr is None:
+            raise RuntimeError('no server_addr configured; try "ceph config-key put mgr/dashboard/server_addr <ip>"')
         log.info("server_addr: %s server_port: %s" % (server_addr, server_port))
         cherrypy.config.update({
             'server.socket_host': server_addr,
@@ -680,7 +749,148 @@ class Module(MgrModule):
             }
         }
         log.info("Serving static from {0}".format(static_dir))
+
+        class OSDEndpoint(EndPoint):
+            def _osd(self, osd_id):
+                osd_id = int(osd_id)
+
+                osd_map = global_instance().get("osd_map")
+
+                osd = None
+                for o in osd_map['osds']:
+                    if o['osd'] == osd_id:
+                        osd = o
+                        break
+
+                assert osd is not None  # TODO 400
+
+                osd_spec = "{0}".format(osd_id)
+
+                osd_metadata = global_instance().get_metadata(
+                        "osd", osd_spec)
+
+                result = CommandResult("")
+                global_instance().send_command(result, "osd", osd_spec,
+                       json.dumps({
+                           "prefix": "perf histogram dump",
+                           }),
+                       "")
+                r, outb, outs = result.wait()
+                assert r == 0
+                histogram = json.loads(outb)
+
+                return {
+                    "osd": osd,
+                    "osd_metadata": osd_metadata,
+                    "osd_histogram": histogram
+                }
+
+            @cherrypy.expose
+            def perf(self, osd_id):
+                template = env.get_template("osd_perf.html")
+                toplevel_data = self._toplevel_data()
+
+                return template.render(
+                    ceph_version=global_instance().version,
+                    toplevel_data=json.dumps(toplevel_data, indent=2),
+                    content_data=json.dumps(self._osd(osd_id), indent=2)
+                )
+
+            @cherrypy.expose
+            @cherrypy.tools.json_out()
+            def perf_data(self, osd_id):
+                return self._osd(osd_id)
+
+            @cherrypy.expose
+            @cherrypy.tools.json_out()
+            def list_data(self):
+                return self._osds_by_server()
+
+            def _osd_summary(self, osd_id, osd_info):
+                """
+                The info used for displaying an OSD in a table
+                """
+
+                osd_spec = "{0}".format(osd_id)
+
+                result = {}
+                result['id'] = osd_id
+                result['stats'] = {}
+                result['stats_history'] = {}
+
+                # Counter stats
+                for s in ['osd.op_w', 'osd.op_in_bytes', 'osd.op_r', 'osd.op_out_bytes']:
+                    result['stats'][s.split(".")[1]] = global_instance().get_rate('osd', osd_spec, s)
+                    result['stats_history'][s.split(".")[1]] = \
+                        global_instance().get_counter('osd', osd_spec, s)[s]
+
+                # Gauge stats
+                for s in ["osd.numpg", "osd.stat_bytes", "osd.stat_bytes_used"]:
+                    result['stats'][s.split(".")[1]] = global_instance().get_latest('osd', osd_spec, s)
+
+                result['up'] = osd_info['up']
+                result['in'] = osd_info['in']
+
+                result['url'] = "/osd/perf/{0}".format(osd_id)
+
+                return result
+
+            def _osds_by_server(self):
+                result = defaultdict(list)
+                servers = global_instance().list_servers()
+
+                osd_map = global_instance().get_sync_object(OsdMap)
+
+                for server in servers:
+                    hostname = server['hostname']
+                    services = server['services']
+                    first = True
+                    for s in services:
+                        if s["type"] == "osd":
+                            osd_id = int(s["id"])
+                            # If metadata doesn't tally with osdmap, drop it.
+                            if osd_id not in osd_map.osds_by_id:
+                                global_instance().log.warn(
+                                    "OSD service {0} missing in OSDMap, stale metadata?".format(osd_id))
+                                continue
+                            summary = self._osd_summary(osd_id,
+                                                        osd_map.osds_by_id[osd_id])
+
+                            if first:
+                                # A little helper for rendering
+                                summary['first'] = True
+                                first = False
+                            result[hostname].append(summary)
+
+                global_instance().log.warn("result.size {0} servers.size {1}".format(
+                    len(result), len(servers)
+                ))
+
+                # Return list form for convenience of rendering
+                return result.items()
+
+            @cherrypy.expose
+            def index(self):
+                """
+                List of all OSDS grouped by host
+                :return:
+                """
+
+                template = env.get_template("osds.html")
+                toplevel_data = self._toplevel_data()
+
+                content_data = {
+                    "osds_by_server": self._osds_by_server()
+                }
+
+                return template.render(
+                    ceph_version=global_instance().version,
+                    toplevel_data=json.dumps(toplevel_data, indent=2),
+                    content_data=json.dumps(content_data, indent=2)
+                )
+
         cherrypy.tree.mount(Root(), "/", conf)
+        cherrypy.tree.mount(OSDEndpoint(), "/osd", conf)
 
         log.info("Starting engine...")
         cherrypy.engine.start()

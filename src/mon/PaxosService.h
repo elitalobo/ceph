@@ -53,7 +53,9 @@ class PaxosService {
    */
   bool proposing;
 
- protected:
+  bool need_immediate_propose = false;
+
+protected:
   /**
    * Services implementing us used to depend on the Paxos version, back when
    * each service would have a Paxos instance for itself. However, now we only
@@ -75,14 +77,22 @@ class PaxosService {
    */
   bool have_pending; 
 
-protected:
+  /**
+   * health checks for this service
+   *
+   * Child must populate this during encode_pending() by calling encode_health().
+   */
+  health_check_map_t health_checks;
+public:
+  const health_check_map_t& get_health_checks() {
+    return health_checks;
+  }
 
+protected:
   /**
    * format of our state in leveldb, 0 for default
    */
   version_t format_version;
-
-
 
   /**
    * @defgroup PaxosService_h_callbacks Callback classes
@@ -357,6 +367,15 @@ public:
   virtual bool should_propose(double &delay);
 
   /**
+   * force an immediate propose.
+   *
+   * This is meant to be called from prepare_update(op).
+   */
+  void force_immediate_propose() {
+    need_immediate_propose = true;
+  }
+
+  /**
    * @defgroup PaxosService_h_courtesy Courtesy functions
    *
    * Courtesy functions, in case the class implementing this service has
@@ -416,6 +435,15 @@ public:
   virtual void get_health(list<pair<health_status_t,string> >& summary,
 			  list<pair<health_status_t,string> > *detail,
 			  CephContext *cct) const { }
+
+  void encode_health(const health_check_map_t& next,
+		     MonitorDBStore::TransactionRef t) {
+    bufferlist bl;
+    ::encode(next, bl);
+    t->put("health", service_name, bl);
+    mon->log_health(next, health_checks, t);
+  }
+  void load_health();
 
  private:
   /**
@@ -772,6 +800,18 @@ public:
   void put_value(MonitorDBStore::TransactionRef t,
 		 const string& key, bufferlist& bl) {
     t->put(get_service_name(), key, bl);
+  }
+
+  /**
+   * Put integer value @v into the key @p key.
+   *
+   * @param t A transaction to which we will add this put operation
+   * @param key The key to which we will add the value
+   * @param v An integer
+   */
+  void put_value(MonitorDBStore::TransactionRef t,
+		 const string& key, version_t v) {
+    t->put(get_service_name(), key, v);
   }
 
   /**

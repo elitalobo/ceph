@@ -690,7 +690,7 @@ void ECBackend::run_recovery_op(
   delete _h;
 }
 
-void ECBackend::recover_object(
+int ECBackend::recover_object(
   const hobject_t &hoid,
   eversion_t v,
   ObjectContextRef head,
@@ -731,6 +731,7 @@ void ECBackend::recover_object(
     }
   }
   dout(10) << __func__ << ": built op " << h->ops.back() << dendl;
+  return 0;
 }
 
 bool ECBackend::can_handle_while_inactive(
@@ -1001,6 +1002,7 @@ void ECBackend::handle_sub_read(
     }
     for (auto j = i->second.begin(); j != i->second.end(); ++j) {
       bufferlist bl;
+
       if ((op.subchunks.find(i->first)->second.size() == 1) && 
           (op.subchunks.find(i->first)->second.front().second == 
                                             ec_impl->get_sub_chunk_count())) {
@@ -1010,8 +1012,7 @@ void ECBackend::handle_sub_read(
 	  ghobject_t(i->first, ghobject_t::NO_GEN, shard),
 	  j->get<0>(),
 	  j->get<1>(),
-	  bl, j->get<2>(),
-	  true); // Allow EIO return
+	  bl, j->get<2>()); // Allow EIO return
       } else {
         dout(25) << __func__ << " case2: going to do fragmented read." << dendl;
         for (int m = 0; m < (int)j->get<1>(); m += sinfo.get_chunk_size()) {
@@ -1022,8 +1023,7 @@ void ECBackend::handle_sub_read(
                 ghobject_t(i->first, ghobject_t::NO_GEN, shard),
                 j->get<0>() + m + (k.first)*subchunk_size,
                 (k.second)*subchunk_size,
-                bl0, j->get<2>(),
-                true);
+                bl0, j->get<2>());
             bl.claim_append(bl0);
           }
         }
@@ -1929,7 +1929,7 @@ bool ECBackend::try_reads_to_commit()
       op->plan,
       ec_impl,
       get_parent()->get_info().pgid.pgid,
-      !get_osdmap()->test_flag(CEPH_OSDMAP_REQUIRE_KRAKEN),
+      (get_osdmap()->require_osd_release < CEPH_RELEASE_KRAKEN),
       sinfo,
       op->remote_read_result,
       op->log_entries,
@@ -2061,7 +2061,7 @@ bool ECBackend::try_finish_rmw()
   if (op->version > committed_to)
     committed_to = op->version;
 
-  if (get_osdmap()->test_flag(CEPH_OSDMAP_REQUIRE_KRAKEN)) {
+  if (get_osdmap()->require_osd_release >= CEPH_RELEASE_KRAKEN) {
     if (op->version > get_parent()->get_log().get_can_rollback_to() &&
 	waiting_reads.empty() &&
 	waiting_commit.empty()) {
@@ -2434,7 +2434,7 @@ void ECBackend::be_deep_scrub(
 	poid, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
       pos,
       stride, bl,
-      fadvise_flags, true);
+      fadvise_flags);
     if (r < 0)
       break;
     if (bl.length() % sinfo.get_chunk_size()) {

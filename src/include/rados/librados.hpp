@@ -267,6 +267,7 @@ namespace librados
     OPERATION_FULL_TRY           = LIBRADOS_OPERATION_FULL_TRY,
     //mainly for delete
     OPERATION_FULL_FORCE	 = LIBRADOS_OPERATION_FULL_FORCE,
+    OPERATION_IGNORE_REDIRECT	 = LIBRADOS_OPERATION_IGNORE_REDIRECT,
   };
 
   /*
@@ -462,6 +463,14 @@ namespace librados
      */
     void cache_pin();
     void cache_unpin();
+
+    /**
+     * Extensible tier
+     *
+     * Set redirect target
+     */
+    void set_redirect(const std::string& tgt_obj, const IoCtx& tgt_ioctx,
+		      uint64_t tgt_version);
 
     friend class IoCtx;
   };
@@ -1288,6 +1297,13 @@ namespace librados
     int conf_parse_env(const char *env) const;
     int conf_set(const char *option, const char *value);
     int conf_get(const char *option, std::string &val);
+
+    int service_daemon_register(
+      const std::string& service,  ///< service name (e.g., 'rgw')
+      const std::string& name,     ///< daemon name (e.g., 'gwfoo')
+      const std::map<std::string,std::string>& metadata); ///< static metadata about daemon
+    int service_daemon_update_status(
+      const std::map<std::string,std::string>& status);
 
     int pool_create(const char *name);
     int pool_create(const char *name, uint64_t auid);

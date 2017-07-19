@@ -27,11 +27,13 @@
 
 #include "auth/AuthAuthorizeHandler.h"
 
+#include "ServiceMap.h"
 #include "MgrSession.h"
 #include "DaemonState.h"
 
 class MMgrReport;
 class MMgrOpen;
+class MMonMgrReport;
 class MCommand;
 struct MgrCommand;
 
@@ -62,6 +64,12 @@ protected:
 
   AuthAuthorizeHandlerRegistry auth_registry;
 
+  /// connections for osds
+  ceph::unordered_map<int,set<ConnectionRef>> osd_cons;
+
+  ServiceMap pending_service_map;  // uncommitted
+  epoch_t pending_service_map_dirty = 0;
+
   Mutex lock;
 
   static void _generate_command_map(map<string,cmd_vartype>& cmdmap,
@@ -79,6 +87,13 @@ private:
   bool _reply(MCommand* m,
 	      int ret, const std::string& s, const bufferlist& payload);
 
+  void _prune_pending_service_map();
+
+  utime_t started_at;
+  bool pgmap_ready = false;
+  std::set<int32_t> reported_osds;
+  void maybe_ready(int32_t osd_id);
+
 public:
   int init(uint64_t gid, entity_addr_t client_addr);
   void shutdown();
@@ -95,7 +110,7 @@ public:
   ~DaemonServer() override;
 
   bool ms_dispatch(Message *m) override;
-  bool ms_handle_reset(Connection *con) override { return false; }
+  bool ms_handle_reset(Connection *con) override;
   void ms_handle_remote_reset(Connection *con) override {}
   bool ms_handle_refused(Connection *con) override;
   bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer,
@@ -111,6 +126,8 @@ public:
   bool handle_open(MMgrOpen *m);
   bool handle_report(MMgrReport *m);
   bool handle_command(MCommand *m);
+  void send_report();
+  void got_service_map();
 };
 
 #endif

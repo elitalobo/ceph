@@ -91,7 +91,7 @@ public:
     uint32_t flags;    // object_copy_data_t::FLAG_*
     uint32_t source_data_digest, source_omap_digest;
     uint32_t data_digest, omap_digest;
-    vector<pair<osd_reqid_t, version_t> > reqids; // [(reqid, user_version)]
+    mempool::osd_pglog::vector<pair<osd_reqid_t, version_t> > reqids; // [(reqid, user_version)]
     map<string, bufferlist> attrs; // xattrs
     uint64_t truncate_seq;
     uint64_t truncate_size;
@@ -263,10 +263,13 @@ public:
     const hobject_t &oid,
     const object_stat_sum_t &stat_diff) override;
   void failed_push(const list<pg_shard_t> &from, const hobject_t &soid) override;
+  void primary_failed(const hobject_t &soid) override;
+  bool primary_error(const hobject_t& soid, eversion_t v) override;
   void cancel_pull(const hobject_t &soid) override;
   void apply_stats(
     const hobject_t &soid,
     const object_stat_sum_t &delta_stats) override;
+  void on_primary_error(const hobject_t &oid, eversion_t v) override;
 
   template<class T> class BlessedGenContext;
   class BlessedContext;
@@ -530,7 +533,7 @@ public:
     int num_read;    ///< count read ops
     int num_write;   ///< count update ops
 
-    vector<pair<osd_reqid_t, version_t> > extra_reqids;
+    mempool::osd_pglog::vector<pair<osd_reqid_t, version_t> > extra_reqids;
 
     CopyFromCallback *copy_cb;
 
@@ -864,7 +867,7 @@ protected:
    * Also used to store error log entries for dup detection.
    */
   void submit_log_entries(
-    const mempool::osd::list<pg_log_entry_t> &entries,
+    const mempool::osd_pglog::list<pg_log_entry_t> &entries,
     ObcLockManager &&manager,
     boost::optional<std::function<void(void)> > &&on_complete,
     OpRequestRef op = OpRequestRef(),
@@ -1117,6 +1120,18 @@ protected:
 					   bool must_promote,
 					   bool in_hit_set,
 					   ObjectContextRef *promote_obc);
+  cache_result_t maybe_handle_manifest_detail(OpRequestRef op,
+						     bool write_ordered,
+						     ObjectContextRef obc);
+  bool maybe_handle_manifest(OpRequestRef op,
+			      bool write_ordered,
+			      ObjectContextRef obc) {
+    return cache_result_t::NOOP != maybe_handle_manifest_detail(
+      op,
+      write_ordered,
+      obc);
+  }
+
   /**
    * This helper function is called from do_op if the ObjectContext lookup fails.
    * @returns true if the caching code is handling the Op, false otherwise.
@@ -1209,7 +1224,7 @@ protected:
     ThreadPool::TPHandle &handle ///< [in] tp handle
     );
 
-  void prep_backfill_object_push(
+  int prep_backfill_object_push(
     hobject_t oid, eversion_t v, ObjectContextRef obc,
     vector<pg_shard_t> peers,
     PGBackend::RecoveryHandle *h);
@@ -1329,7 +1344,7 @@ protected:
   // -- proxyread --
   map<ceph_tid_t, ProxyReadOpRef> proxyread_ops;
 
-  void do_proxy_read(OpRequestRef op);
+  void do_proxy_read(OpRequestRef op, ObjectContextRef obc = NULL);
   void finish_proxy_read(hobject_t oid, ceph_tid_t tid, int r);
   void cancel_proxy_read(ProxyReadOpRef prdop);
 
@@ -1338,7 +1353,7 @@ protected:
   // -- proxywrite --
   map<ceph_tid_t, ProxyWriteOpRef> proxywrite_ops;
 
-  void do_proxy_write(OpRequestRef op, const hobject_t& missing_oid);
+  void do_proxy_write(OpRequestRef op, const hobject_t& missing_oid, ObjectContextRef obc = NULL);
   void finish_proxy_write(hobject_t oid, ceph_tid_t tid, int r);
   void cancel_proxy_write(ProxyWriteOpRef pwop);
 
@@ -1374,7 +1389,7 @@ public:
 
   void handle_backoff(OpRequestRef& op);
 
-  OpContextUPtr trim_object(bool first, const hobject_t &coid);
+  int trim_object(bool first, const hobject_t &coid, OpContextUPtr *ctxp);
   void snap_trimmer(epoch_t e) override;
   void kick_snap_trim() override;
   void snap_trimmer_scrub_complete() override;
@@ -1660,6 +1675,7 @@ private:
       pending = nullptr;
       auto *pg = context< SnapTrimmer >().pg;
       pg->state_clear(PG_STATE_SNAPTRIM_WAIT);
+      pg->state_clear(PG_STATE_SNAPTRIM_ERROR);
       pg->publish_stats_to_osd();
     }
   };
@@ -1719,6 +1735,8 @@ public:
 
   void block_write_on_full_cache(
     const hobject_t& oid, OpRequestRef op);
+  void block_for_clean(
+    const hobject_t& oid, OpRequestRef op);
   void block_write_on_snap_rollback(
     const hobject_t& oid, ObjectContextRef obc, OpRequestRef op);
   void block_write_on_degraded_snap(const hobject_t& oid, OpRequestRef op);
@@ -1751,6 +1769,7 @@ public:
   void on_shutdown() override;
   bool check_failsafe_full(ostream &ss) override;
   bool check_osdmap_full(const set<pg_shard_t> &missing_on) override;
+  int rep_repair_primary_object(const hobject_t& soid, OpRequestRef op);
 
   // attr cache handling
   void setattr_maybe_cache(

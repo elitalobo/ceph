@@ -19,6 +19,11 @@ if test $(id -u) != 0 ; then
 fi
 export LC_ALL=C # the following is vulnerable to i18n
 
+function munge_ceph_spec_in {
+    local OUTFILE=$1
+    sed -e 's/@//g' -e 's/%bcond_with make_check/%bcond_without make_check/g' < ceph.spec.in > $OUTFILE
+}
+
 if [ x`uname`x = xFreeBSDx ]; then
     $SUDO pkg install -yq \
         devel/git \
@@ -30,7 +35,6 @@ if [ x`uname`x = xFreeBSDx ]; then
         devel/boost-python-libs \
         devel/valgrind \
         devel/pkgconf \
-        devel/libatomic_ops \
         devel/libedit \
         devel/libtool \
         devel/google-perftools \
@@ -44,6 +48,7 @@ if [ x`uname`x = xFreeBSDx ]; then
         ftp/curl \
         misc/e2fsprogs-libuuid \
         misc/getopt \
+        net/socat \
         textproc/expat2 \
         textproc/gsed \
         textproc/libxml2 \
@@ -53,12 +58,16 @@ if [ x`uname`x = xFreeBSDx ]; then
         emulators/fuse \
         java/junit \
         lang/python27 \
+	devel/py-pip \
         devel/py-argparse \
         devel/py-nose \
         www/py-flask \
         www/fcgi \
         sysutils/flock \
         sysutils/fusefs-libs \
+
+	# Now use pip to install some extra python modules
+	pip install pecan
 
     exit
 else
@@ -125,14 +134,14 @@ else
                 fi
                 ;;
         esac
-        sed -e 's/@//g' < ceph.spec.in > $DIR/ceph.spec
+        munge_ceph_spec_in $DIR/ceph.spec
         $SUDO $builddepcmd $DIR/ceph.spec 2>&1 | tee $DIR/yum-builddep.out
         ! grep -q -i error: $DIR/yum-builddep.out || exit 1
         ;;
     opensuse|suse|sles)
         echo "Using zypper to install dependencies"
         $SUDO zypper --gpg-auto-import-keys --non-interactive install lsb-release systemd-rpm-macros
-        sed -e 's/@//g' < ceph.spec.in > $DIR/ceph.spec
+        munge_ceph_spec_in $DIR/ceph.spec
         $SUDO zypper --non-interactive install $(rpmspec -q --buildrequires $DIR/ceph.spec) || exit 1
         ;;
     alpine)
@@ -160,7 +169,8 @@ function populate_wheelhouse() {
 
     # although pip comes with virtualenv, having a recent version
     # of pip matters when it comes to using wheel packages
-    pip --timeout 300 $install 'setuptools >= 0.8' 'pip >= 7.0' 'wheel >= 0.24' || return 1
+    # workaround of https://github.com/pypa/setuptools/issues/1042
+    pip --timeout 300 $install 'setuptools >= 0.8,< 36' 'pip >= 7.0' 'wheel >= 0.24' || return 1
     if test $# != 0 ; then
         pip --timeout 300 $install $@ || return 1
     fi

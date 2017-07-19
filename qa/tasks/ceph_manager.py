@@ -125,6 +125,7 @@ class Thrasher:
         self.chance_thrash_cluster_full = self.config.get('chance_thrash_cluster_full', .05)
         self.chance_thrash_pg_upmap = self.config.get('chance_thrash_pg_upmap', 1.0)
         self.chance_thrash_pg_upmap_items = self.config.get('chance_thrash_pg_upmap', 1.0)
+        self.random_eio = self.config.get('random_eio')
 
         num_osds = self.in_osds + self.out_osds
         self.max_pgs = self.config.get("max_pgs_per_pool_osd", 1200) * num_osds
@@ -435,6 +436,12 @@ class Thrasher:
             skip_admin_check=skip_admin_check)
         self.dead_osds.remove(osd)
         self.live_osds.append(osd)
+        if self.random_eio > 0 and osd is self.rerrosd:
+            self.ceph_manager.raw_cluster_cmd('tell', 'osd.'+str(self.rerrosd),
+                          'injectargs', '--', '--filestore_debug_random_read_err='+str(self.random_eio))
+            self.ceph_manager.raw_cluster_cmd('tell', 'osd.'+str(self.rerrosd),
+                          'injectargs', '--', '--bluestore_debug_random_read_err='+str(self.random_eio))
+
 
     def out_osd(self, osd=None):
         """
@@ -606,6 +613,17 @@ class Thrasher:
         while len(self.out_osds) > 0:
             self.log("inning osd")
             self.in_osd()
+
+    def all_up_in(self):
+        """
+        Make sure all osds are up and fully in.
+        """
+        self.all_up();
+        for osd in self.live_osds:
+            self.ceph_manager.raw_cluster_cmd('osd', 'reweight',
+                                              str(osd), str(1))
+            self.ceph_manager.raw_cluster_cmd('osd', 'primary-affinity',
+                                              str(osd), str(1))
 
     def do_join(self):
         """
@@ -944,6 +962,12 @@ class Thrasher:
         scrubint = self.config.get("scrub_interval", -1)
         maxdead = self.config.get("max_dead", 0)
         delay = self.config.get("op_delay", 5)
+        self.rerrosd = self.live_osds[0]
+        if self.random_eio > 0:
+            self.ceph_manager.raw_cluster_cmd('tell', 'osd.'+str(self.rerrosd),
+                          'injectargs', '--', '--filestore_debug_random_read_err='+str(self.random_eio))
+            self.ceph_manager.raw_cluster_cmd('tell', 'osd.'+str(self.rerrosd),
+                          'injectargs', '--', '--bluestore_debug_random_read_err='+str(self.random_eio))
         self.log("starting do_thrash")
         while not self.stopping:
             to_log = [str(x) for x in ["in_osds: ", self.in_osds,
@@ -971,6 +995,11 @@ class Thrasher:
                         Scrubber(self.ceph_manager, self.config)
             self.choose_action()()
             time.sleep(delay)
+        if self.random_eio > 0:
+            self.ceph_manager.raw_cluster_cmd('tell', 'osd.'+str(self.rerrosd),
+                          'injectargs', '--', '--filestore_debug_random_read_err=0.0')
+            self.ceph_manager.raw_cluster_cmd('tell', 'osd.'+str(self.rerrosd),
+                          'injectargs', '--', '--bluestore_debug_random_read_err=0.0')
         for pool in list(self.pools_to_fix_pgp_num):
             if self.ceph_manager.get_pool_pg_num(pool) > 0:
                 self.fix_pgp_num(pool)
@@ -978,7 +1007,7 @@ class Thrasher:
         for service, opt, saved_value in self.saved_options:
             self._set_config(service, '*', opt, saved_value)
         self.saved_options = []
-        self.all_up()
+        self.all_up_in()
 
 
 class ObjectStoreTool:
@@ -1147,6 +1176,47 @@ class CephManager:
                   self.cluster,
                   "-w"],
             wait=False, stdout=StringIO(), stdin=run.PIPE)
+
+    def flush_pg_stats(self, osds, no_wait=None, wait_for_mon=300):
+        """
+        Flush pg stats from a list of OSD ids, ensuring they are reflected
+        all the way to the monitor.  Luminous and later only.
+
+        :param osds: list of OSDs to flush
+        :param no_wait: list of OSDs not to wait for seq id. by default, we
+                        wait for all specified osds, but some of them could be
+                        moved out of osdmap, so we cannot get their updated
+                        stat seq from monitor anymore. in that case, you need
+                        to pass a blacklist.
+        :param wait_for_mon: wait for mon to be synced with mgr. 0 to disable
+                             it. (5 min by default)
+        """
+        seq = {osd: self.raw_cluster_cmd('tell', 'osd.%d' % osd, 'flush_pg_stats')
+               for osd in osds}
+        if not wait_for_mon:
+            return
+        if no_wait is None:
+            no_wait = []
+        for osd, need in seq.iteritems():
+            if osd in no_wait:
+                continue
+            got = 0
+            while wait_for_mon > 0:
+                got = self.raw_cluster_cmd('osd', 'last-stat-seq', 'osd.%d' % osd)
+                self.log('need seq {need} got {got} for osd.{osd}'.format(
+                    need=need, got=got, osd=osd))
+                if got >= need:
+                    break
+                A_WHILE = 1
+                time.sleep(A_WHILE)
+                wait_for_mon -= A_WHILE
+            else:
+                raise Exception('timed out waiting for mon to be updated with '
+                                'osd.{osd}: {got} < {need}'.
+                                format(osd=osd, got=got, need=need))
+
+    def flush_all_pg_stats(self):
+        self.flush_pg_stats(range(len(self.get_osd_dump())))
 
     def do_rados(self, remote, cmd, check_status=True):
         """
@@ -2267,6 +2337,20 @@ class CephManager:
             remote.console.power_on()
             self.make_admin_daemon_dir(remote)
         self.ctx.daemons.get_daemon('mon', mon, self.cluster).restart()
+
+    def revive_mgr(self, mgr):
+        """
+        Restart by either power cycling (if the config says so),
+        or by doing a normal restart.
+        """
+        if self.config.get('powercycle'):
+            remote = self.find_remote('mgr', mgr)
+            self.log('revive_mgr on mgr.{m} doing powercycle of {s}'.
+                     format(m=mgr, s=remote.name))
+            self._assert_ipmi(remote)
+            remote.console.power_on()
+            self.make_admin_daemon_dir(remote)
+        self.ctx.daemons.get_daemon('mgr', mgr, self.cluster).restart()
 
     def get_mon_status(self, mon):
         """

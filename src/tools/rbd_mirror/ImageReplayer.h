@@ -47,6 +47,7 @@ namespace journal { template <typename> class Replay; }
 namespace rbd {
 namespace mirror {
 
+template <typename> struct InstanceWatcher;
 template <typename> struct Threads;
 
 namespace image_replayer { template <typename> class BootstrapRequest; }
@@ -73,10 +74,10 @@ public:
   static ImageReplayer *create(
     Threads<librbd::ImageCtx> *threads,
     std::shared_ptr<ImageDeleter> image_deleter,
-    ImageSyncThrottlerRef<ImageCtxT> image_sync_throttler,
+    InstanceWatcher<ImageCtxT> *instance_watcher,
     RadosRef local, const std::string &local_mirror_uuid, int64_t local_pool_id,
     const std::string &global_image_id) {
-    return new ImageReplayer(threads, image_deleter, image_sync_throttler,
+    return new ImageReplayer(threads, image_deleter, instance_watcher,
                              local, local_mirror_uuid, local_pool_id,
                              global_image_id);
   }
@@ -86,7 +87,7 @@ public:
 
   ImageReplayer(Threads<librbd::ImageCtx> *threads,
                 std::shared_ptr<ImageDeleter> image_deleter,
-                ImageSyncThrottlerRef<ImageCtxT> image_sync_throttler,
+                InstanceWatcher<ImageCtxT> *instance_watcher,
                 RadosRef local, const std::string &local_mirror_uuid,
                 int64_t local_pool_id, const std::string &global_image_id);
   virtual ~ImageReplayer();
@@ -283,7 +284,7 @@ private:
 
   Threads<librbd::ImageCtx> *m_threads;
   std::shared_ptr<ImageDeleter> m_image_deleter;
-  ImageSyncThrottlerRef<ImageCtxT> m_image_sync_throttler;
+  InstanceWatcher<ImageCtxT> *m_instance_watcher;
 
   RemoteImages m_remote_images;
   RemoteImage m_remote_image;
@@ -299,7 +300,7 @@ private:
   int m_last_r = 0;
   std::string m_state_desc;
   BootstrapProgressContext m_progress_cxt;
-  bool m_do_resync;
+  bool m_do_resync{false};
   image_replayer::EventPreprocessor<ImageCtxT> *m_event_preprocessor = nullptr;
   image_replayer::ReplayStatusFormatter<ImageCtxT> *m_replay_status_formatter =
     nullptr;

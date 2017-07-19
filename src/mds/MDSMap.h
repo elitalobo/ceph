@@ -21,10 +21,12 @@
 #include "include/types.h"
 #include "common/Clock.h"
 #include "msg/Message.h"
+#include "include/health.h"
 
 #include <set>
 #include <map>
 #include <string>
+#include <algorithm>
 
 #include "common/config.h"
 
@@ -57,6 +59,7 @@
 */
 
 class CephContext;
+class health_check_map_t;
 
 extern CompatSet get_mdsmap_compat_set_all();
 extern CompatSet get_mdsmap_compat_set_default();
@@ -178,7 +181,7 @@ protected:
   __u32 session_autoclose;
   uint64_t max_file_size;
 
-  std::set<int64_t> data_pools;  // file data pools available to clients (via an ioctl).  first is the default.
+  std::vector<int64_t> data_pools;  // file data pools available to clients (via an ioctl).  first is the default.
   int64_t cas_pool;            // where CAS objects go
   int64_t metadata_pool;       // where fs metadata objects go
   
@@ -309,11 +312,14 @@ public:
   mds_rank_t get_tableserver() const { return tableserver; }
   mds_rank_t get_root() const { return root; }
 
-  const std::set<int64_t> &get_data_pools() const { return data_pools; }
+  const std::vector<int64_t> &get_data_pools() const { return data_pools; }
   int64_t get_first_data_pool() const { return *data_pools.begin(); }
   int64_t get_metadata_pool() const { return metadata_pool; }
   bool is_data_pool(int64_t poolid) const {
-    return data_pools.count(poolid);
+    auto p = std::find(data_pools.begin(), data_pools.end(), poolid);
+    if (p == data_pools.end())
+      return false;
+    return true;
   }
 
   bool pool_in_use(int64_t poolid) const {
@@ -364,10 +370,10 @@ public:
 
   // data pools
   void add_data_pool(int64_t poolid) {
-    data_pools.insert(poolid);
+    data_pools.push_back(poolid);
   }
   int remove_data_pool(int64_t poolid) {
-    std::set<int64_t>::iterator p = data_pools.find(poolid);
+    std::vector<int64_t>::iterator p = std::find(data_pools.begin(), data_pools.end(), poolid);
     if (p == data_pools.end())
       return -ENOENT;
     data_pools.erase(p);
@@ -459,6 +465,8 @@ public:
 
   void get_health(list<pair<health_status_t,std::string> >& summary,
 		  list<pair<health_status_t,std::string> > *detail) const;
+
+  void get_health_checks(health_check_map_t *checks) const;
 
   typedef enum
   {

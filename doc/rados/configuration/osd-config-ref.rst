@@ -420,7 +420,7 @@ recovery operations to ensure optimal performance during recovery.
               ``osd client op priority``.
 
 :Type: 32-bit Integer
-:Default: ``10`` 
+:Default: ``3`` 
 :Valid Range: 1-63
 
 
@@ -654,7 +654,7 @@ perform well in a degraded state.
               increased load on the cluster.
 
 :Type: 32-bit Integer
-:Default: ``15``
+:Default: ``3``
 
 
 ``osd recovery max chunk`` 
@@ -686,6 +686,16 @@ perform well in a degraded state.
 
 :Type: Boolean
 :Default: ``true``
+
+
+``osd recovery sleep``
+
+:Description: Time to sleep before next recovery. Increasing this value will
+              slow down recovery operation while client operations will be
+              less impacted.
+
+:Type: Float
+:Default: ``0.01``
 
 Tiering
 =======
@@ -773,13 +783,6 @@ Miscellaneous
 :Description: Uses ``tmap`` for debugging only.
 :Type: Boolean
 :Default: ``false`` 
-
-
-``osd preserve trimmed log``
-
-:Description: Preserves trimmed log files, but uses more disk space.
-:Type: Boolean
-:Default: ``false``
 
 
 ``osd fast fail on connection refused``

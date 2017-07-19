@@ -1,9 +1,3 @@
-if(HAVE_LIBXFS)
-  set(libos_xfs_srcs
-    filestore/XfsFileStoreBackend.cc
-    fs/XFS.cc)
-endif(HAVE_LIBXFS)
-
 set(libos_srcs
   ObjectStore.cc
   Transaction.cc
@@ -19,13 +13,11 @@ set(libos_srcs
   filestore/IndexManager.cc
   filestore/LFNIndex.cc
   filestore/WBThrottle.cc
-  filestore/ZFSFileStoreBackend.cc
   memstore/MemStore.cc
   kstore/KStore.cc
   kstore/kstore_types.cc
   fs/FS.cc
-  fs/aio.cc
-  ${libos_xfs_srcs})
+  fs/aio.cc)
 
 if(HAVE_LIBAIO)
   list(APPEND libos_srcs
@@ -50,6 +42,26 @@ if(WITH_FUSE)
     FuseStore.cc)
 endif(WITH_FUSE)
 
+if(WITH_PMEM)
+  list(APPEND libos_srcs
+    bluestore/PMEMDevice.cc)
+endif(WITH_PMEM)
+
+if(HAVE_LIBXFS)
+  list(APPEND libos_srcs
+    filestore/XfsFileStoreBackend.cc
+    fs/XFS.cc)
+endif()
+
+if(HAVE_LIBZFS)
+  add_library(os_zfs_objs OBJECT
+    filestore/ZFSFileStoreBackend.cc
+    fs/ZFS.cc)
+  target_include_directories(os_zfs_objs PRIVATE
+    ${ZFS_INCLUDE_DIRS})
+  list(APPEND libos_srcs $<TARGET_OBJECTS:os_zfs_objs>)
+endif()
+
 if(WITH_SPDK)
   list(APPEND libos_srcs
     bluestore/NVMEDevice.cc)
@@ -65,6 +77,14 @@ endif(HAVE_LIBAIO)
 
 if(WITH_FUSE)
   target_link_libraries(os ${FUSE_LIBRARIES})
+endif()
+
+if(WITH_PMEM)
+  target_link_libraries(os ${PMEM_LIBRARY})
+endif()
+
+if(HAVE_LIBZFS)
+  target_link_libraries(os ${ZFS_LIBRARIES})
 endif()
 
 if(WITH_SPDK)

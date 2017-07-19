@@ -24,11 +24,6 @@
 #include "mon/MonClient.h"
 #include "osdc/Objecter.h"
 
-#include "DaemonServer.h"
-#include "PyModules.h"
-
-#include "DaemonState.h"
-#include "ClusterState.h"
 
 class MMgrMap;
 class Mgr;
@@ -53,15 +48,19 @@ protected:
   Mutex lock;
   SafeTimer timer;
 
-  std::unique_ptr<Mgr> active_mgr;
+  std::shared_ptr<Mgr> active_mgr;
+
+  int orig_argc;
+  const char **orig_argv;
 
   std::string state_str();
 
   void handle_mgr_map(MMgrMap *m);
   void _update_log_config();
+  void send_beacon();
 
 public:
-  MgrStandby();
+  MgrStandby(int argc, const char **argv);
   ~MgrStandby() override;
 
   bool ms_dispatch(Message *m) override;
@@ -73,10 +72,10 @@ public:
 
   int init();
   void shutdown();
-  void usage() {}
+  void respawn();
   int main(vector<const char *> args);
   void handle_signal(int signum);
-  void send_beacon();
+  void tick();
 };
 
 #endif

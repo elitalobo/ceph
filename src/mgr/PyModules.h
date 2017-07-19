@@ -22,6 +22,8 @@
 
 #include "osdc/Objecter.h"
 #include "client/Client.h"
+#include "common/LogClient.h"
+#include "mon/MgrMap.h"
 
 #include "DaemonState.h"
 #include "ClusterState.h"
@@ -35,6 +37,7 @@ class PyModules
   DaemonStateIndex &daemon_state;
   ClusterState &cluster_state;
   MonClient &monc;
+  LogChannelRef clog;
   Objecter &objecter;
   Client   &client;
   Finisher &finisher;
@@ -43,11 +46,13 @@ class PyModules
 
   std::string get_site_packages();
 
+  PyThreadState *pMainThreadState = nullptr;
+
 public:
   static std::string config_prefix;
 
   PyModules(DaemonStateIndex &ds, ClusterState &cs, MonClient &mc,
-            Objecter &objecter_, Client &client_,
+            LogChannelRef clog_, Objecter &objecter_, Client &client_,
             Finisher &f);
 
   ~PyModules();
@@ -60,11 +65,17 @@ public:
   PyObject *get_python(const std::string &what);
   PyObject *get_server_python(const std::string &hostname);
   PyObject *list_servers_python();
-  PyObject *get_metadata_python(std::string const &handle,
-      entity_type_t svc_type, const std::string &svc_id);
-  PyObject *get_counter_python(std::string const &handle,
-      entity_type_t svc_type, const std::string &svc_id,
-      const std::string &path);
+  PyObject *get_metadata_python(
+    std::string const &handle,
+    const std::string &svc_name, const std::string &svc_id);
+  PyObject *get_daemon_status_python(
+    std::string const &handle,
+    const std::string &svc_name, const std::string &svc_id);
+  PyObject *get_counter_python(
+    std::string const &handle,
+    const std::string &svc_name,
+    const std::string &svc_id,
+    const std::string &path);
   PyObject *get_context();
 
   std::map<std::string, std::string> config_cache;
@@ -90,11 +101,15 @@ public:
 
   bool get_config(const std::string &handle,
       const std::string &key, std::string *val) const;
+  PyObject *get_config_prefix(const std::string &handle,
+			      const std::string &prefix) const;
   void set_config(const std::string &handle,
       const std::string &key, const std::string &val);
 
   void log(const std::string &handle,
            int level, const std::string &record);
+
+  static void list_modules(std::set<std::string> *modules);
 };
 
 #endif

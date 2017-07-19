@@ -128,6 +128,7 @@ enum {
    * Mainly for delete op
    */
   LIBRADOS_OPERATION_FULL_FORCE		= 128,
+  LIBRADOS_OPERATION_IGNORE_REDIRECT	= 256,
 };
 /** @} */
 
@@ -3652,8 +3653,82 @@ typedef void (*rados_log_callback_t)(void *arg,
 				     uint64_t seq, const char *level,
 				     const char *msg);
 
+/*
+ * This is not a doxygen comment leadin, because doxygen breaks on
+ * a typedef with function params and returns, and I can't figure out
+ * how to fix it.
+ *
+ * Monitor cluster log
+ *
+ * Monitor events logged to the cluster log.  The callback get each
+ * log entry both as a single formatted line and with each field in a
+ * separate arg.
+ *
+ * Calling with a cb argument of NULL will deregister any previously
+ * registered callback.
+ *
+ * @param cluster cluster handle
+ * @param level minimum log level (debug, info, warn|warning, err|error)
+ * @param cb callback to run for each log message. It MUST NOT block
+ * nor call back into librados.
+ * @param arg void argument to pass to cb
+ *
+ * @returns 0 on success, negative code on error
+ */
+typedef void (*rados_log_callback2_t)(void *arg,
+				     const char *line,
+				     const char *channel,
+				     const char *who,
+				     const char *name,
+				     uint64_t sec, uint64_t nsec,
+				     uint64_t seq, const char *level,
+				     const char *msg);
+
 CEPH_RADOS_API int rados_monitor_log(rados_t cluster, const char *level,
                                      rados_log_callback_t cb, void *arg);
+CEPH_RADOS_API int rados_monitor_log2(rados_t cluster, const char *level,
+				      rados_log_callback2_t cb, void *arg);
+
+
+/**
+ * register daemon instance for a service
+ *
+ * Register us as a daemon providing a particular service.  We identify
+ * the service (e.g., 'rgw') and our instance name (e.g., 'rgw.$hostname').
+ * The metadata is a map of keys and values with arbitrary static metdata
+ * for this instance.  The encoding is a series of NULL-terminated strings,
+ * alternating key names and values, terminating with an empty key name.
+ * For example,  "foo\0bar\0this\0that\0\0" is the dict {foo=bar,this=that}.
+ *
+ * For the lifetime of the librados instance, regular beacons will be sent
+ * to the cluster to maintain our registration in the service map.
+ *
+ * @param cluster handle
+ * @param service service name
+ * @param daemon deamon instance name
+ * @param metadata_dict static daemon metadata dict
+ */
+CEPH_RADOS_API int rados_service_register(
+  rados_t cluster,
+  const char *service,
+  const char *daemon,
+  const char *metadata_dict);
+
+/**
+ * update daemon status
+ *
+ * Update our mutable status information in the service map.
+ *
+ * The status dict is encoded the same way the daemon metadata is encoded
+ * for rados_service_register.  For example, "foo\0bar\0this\0that\0\0" is
+ * {foo=bar,this=that}.
+ *
+ * @param cluster rados cluster handle
+ * @param status_dict status dict
+ */
+CEPH_RADOS_API int rados_service_update_status(
+  rados_t cluster,
+  const char *status_dict);
 
 /** @} Mon/OSD/PG commands */
 

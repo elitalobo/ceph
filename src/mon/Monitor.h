@@ -27,14 +27,17 @@
 #include <cmath>
 
 #include "include/types.h"
+#include "include/health.h"
 #include "msg/Messenger.h"
 
 #include "common/Timer.h"
 
+#include "health_check.h"
 #include "MonMap.h"
 #include "Elector.h"
 #include "Paxos.h"
 #include "Session.h"
+#include "PGStatService.h"
 
 #include "common/LogClient.h"
 #include "auth/cephx/CephxKeyServer.h"
@@ -169,6 +172,8 @@ public:
   MgrClient mgr_client;
   uint64_t mgr_proxy_bytes = 0;  // in-flight proxied mgr command message bytes
 
+  const MonPGStatService *pgservice;
+
 private:
   void new_tick();
 
@@ -230,6 +235,11 @@ private:
   set<int> quorum;       // current active set of monitors (if !starting)
   utime_t leader_since;  // when this monitor became the leader, if it is the leader
   utime_t exited_quorum; // time detected as not in quorum; 0 if in
+
+  // map of counts of connected clients, by type and features, for
+  // each quorum mon
+  map<int,FeatureMap> quorum_feature_map;
+
   /**
    * Intersection of quorum member's connection feature bits.
    */
@@ -488,6 +498,7 @@ private:
   version_t timecheck_round;
   unsigned int timecheck_acks;
   utime_t timecheck_round_start;
+  friend class HealthMonitor;
   /* When we hit a skew we will start a new round based off of
    * 'mon_timecheck_skew_interval'. Each new round will be backed off
    * until we hit 'mon_timecheck_interval' -- which is the typical
@@ -548,6 +559,9 @@ private:
 public:
   epoch_t get_epoch();
   int get_leader() const { return leader; }
+  string get_leader_name() {
+    return quorum.empty() ? string() : monmap->get_name(*quorum.begin());
+  }
   const set<int>& get_quorum() const { return quorum; }
   list<string> get_quorum_names() {
     list<string> q;
@@ -571,6 +585,8 @@ public:
   void apply_monmap_to_compatset_features();
   void calc_quorum_requirements();
 
+  void get_combined_feature_map(FeatureMap *fm);
+
 private:
   void _reset();   ///< called from bootstrap, start_, or join_election
   void wait_for_paxos_write();
@@ -584,6 +600,7 @@ public:
   void win_election(epoch_t epoch, set<int>& q,
 		    uint64_t features,
                     const mon_feature_t& mon_features,
+		    const map<int,Metadata>& metadata,
 		    const MonCommand *cmdset, int cmdsize);
   void lose_election(epoch_t epoch, set<int>& q, int l,
 		     uint64_t features,
@@ -601,8 +618,6 @@ public:
    * Vector holding the Services serviced by this Monitor.
    */
   vector<PaxosService*> paxos_service;
-
-  PaxosService *get_paxos_service_by_name(const string& name);
 
   class PGMonitor *pgmon() {
     return (class PGMonitor *)paxos_service[PAXOS_PGMAP];
@@ -630,6 +645,14 @@ public:
 
   class MgrMonitor *mgrmon() {
     return (class MgrMonitor*) paxos_service[PAXOS_MGR];
+  }
+
+  class MgrStatMonitor *mgrstatmon() {
+    return (class MgrStatMonitor*) paxos_service[PAXOS_MGRSTAT];
+  }
+
+  class MgrStatMonitor *healthmon() {
+    return (class MgrStatMonitor*) paxos_service[PAXOS_MGRSTAT];
   }
 
   friend class Paxos;
@@ -679,6 +702,7 @@ public:
   int print_nodes(Formatter *f, ostream& err);
 
   // Accumulate metadata across calls to update_mon_metadata
+  map<int, Metadata> mon_metadata;
   map<int, Metadata> pending_metadata;
 
   /**
@@ -720,6 +744,18 @@ public:
    */
   health_status_t get_health(list<string>& status, bufferlist *detailbl,
                              Formatter *f);
+
+  health_status_t get_health_status(
+    bool want_detail,
+    Formatter *f,
+    std::string *plain,
+    const char *sep1 = " ",
+    const char *sep2 = "; ");
+  void log_health(
+    const health_check_map_t& updated,
+    const health_check_map_t& previous,
+    MonitorDBStore::TransactionRef t);
+
   void get_cluster_status(stringstream &ss, Formatter *f);
 
   void reply_command(MonOpRequestRef op, int rc, const string &rs, version_t version);
@@ -859,8 +895,10 @@ public:
   int write_default_keyring(bufferlist& bl);
   void extract_save_mon_key(KeyRing& keyring);
 
+  void collect_metadata(Metadata *m);
   void update_mon_metadata(int from, Metadata&& m);
-  int load_metadata(map<int, Metadata>& m);
+  int load_metadata();
+  void count_metadata(const string& field, Formatter *f);
 
   // features
   static CompatSet get_initial_supported_features();
@@ -942,8 +980,6 @@ public:
 #define CEPH_MON_FEATURE_INCOMPAT_ERASURE_CODE_PLUGINS_V3 CompatSet::Feature(7, "support shec erasure code")
 #define CEPH_MON_FEATURE_INCOMPAT_KRAKEN CompatSet::Feature(8, "support monmap features")
 // make sure you add your feature to Monitor::get_supported_features
-
-long parse_pos_long(const char *s, ostream *pss = NULL);
 
 struct MonCommand {
   string cmdstring;

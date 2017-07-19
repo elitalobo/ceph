@@ -3,14 +3,16 @@
 
 
 #include <cstring>
-#include <regex>
 #include <sstream>
 #include <stack>
 #include <utility>
 
+#include <boost/regex.hpp>
+
 #include "rapidjson/reader.h"
 
 #include "rgw_auth.h"
+#include <arpa/inet.h>
 #include "rgw_iam_policy.h"
 
 namespace {
@@ -22,10 +24,7 @@ using std::find;
 using std::int64_t;
 using std::move;
 using std::pair;
-using std::regex;
-using std::regex_match;
 using std::size_t;
-using std::smatch;
 using std::string;
 using std::stringstream;
 using std::ostream;
@@ -36,6 +35,11 @@ using std::unordered_map;
 using boost::container::flat_set;
 using boost::none;
 using boost::optional;
+using boost::regex;
+using boost::regex_constants::ECMAScript;
+using boost::regex_constants::optimize;
+using boost::regex_match;
+using boost::smatch;
 
 using rapidjson::BaseReaderHandler;
 using rapidjson::UTF8;
@@ -201,13 +205,15 @@ ARN::ARN(const rgw_bucket& b, const string& o)
 }
 
 optional<ARN> ARN::parse(const string& s, bool wildcards) {
-  static const regex rx_wild("arn:([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)",
-			     std::regex_constants::ECMAScript |
-			     std::regex_constants::optimize);
-  static const regex rx_no_wild(
-    "arn:([^:*]*):([^:*]*):([^:*]*):([^:*]*):([^:*]*)",
-    std::regex_constants::ECMAScript |
-    std::regex_constants::optimize);
+  static const char str_wild[] = "arn:([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)";
+  static const regex rx_wild(str_wild,
+				    sizeof(str_wild) - 1,
+				    ECMAScript | optimize);
+  static const char str_no_wild[]
+    = "arn:([^:*]*):([^:*]*):([^:*]*):([^:*]*):([^:*]*)";
+  static const regex rx_no_wild(str_no_wild,
+				sizeof(str_no_wild) - 1,
+				ECMAScript | optimize);
 
   smatch match;
 
@@ -406,6 +412,8 @@ static const actpair actpairs[] =
  { "s3:DeleteBucketWebsite", s3DeleteBucketWebsite },
  { "s3:DeleteObject", s3DeleteObject },
  { "s3:DeleteObjectVersion", s3DeleteObjectVersion },
+ { "s3:DeleteObjectTagging", s3DeleteObjectTagging },
+ { "s3:DeleteObjectVersionTagging", s3DeleteObjectVersionTagging },
  { "s3:DeleteReplicationConfiguration", s3DeleteReplicationConfiguration },
  { "s3:GetAccelerateConfiguration", s3GetAccelerateConfiguration },
  { "s3:GetBucketAcl", s3GetBucketAcl },
@@ -425,6 +433,8 @@ static const actpair actpairs[] =
  { "s3:GetObjectVersionAcl", s3GetObjectVersionAcl },
  { "s3:GetObjectVersion", s3GetObjectVersion },
  { "s3:GetObjectVersionTorrent", s3GetObjectVersionTorrent },
+ { "s3:GetObjectTagging", s3GetObjectTagging },
+ { "s3:GetObjectVersionTagging", s3GetObjectVersionTagging},
  { "s3:GetReplicationConfiguration", s3GetReplicationConfiguration },
  { "s3:ListAllMyBuckets", s3ListAllMyBuckets },
  { "s3:ListBucketMultiPartUploads", s3ListBucketMultiPartUploads },
@@ -445,6 +455,8 @@ static const actpair actpairs[] =
  { "s3:PutObjectAcl",  s3PutObjectAcl },
  { "s3:PutObject", s3PutObject },
  { "s3:PutObjectVersionAcl", s3PutObjectVersionAcl },
+ { "s3:PutObjectTagging", s3PutObjectTagging },
+ { "s3:PutObjectVersionTagging", s3PutObjectVersionTagging },
  { "s3:PutReplicationConfiguration", s3PutReplicationConfiguration },
  { "s3:RestoreObject", s3RestoreObject }};
 
@@ -703,12 +715,12 @@ static optional<Principal> parse_principal(CephContext* cct, TokenID t,
       return Principal::tenant(std::move(a->account));
     }
 
-    static const regex rx("([^/]*)/(.*)",
-			  std::regex_constants::ECMAScript |
-			  std::regex_constants::optimize);
+    static const char rx_str[] = "([^/]*)/(.*)";
+    static const regex rx(rx_str, sizeof(rx_str) - 1,
+			  ECMAScript | optimize);
     smatch match;
     if (regex_match(a->resource, match, rx)) {
-      ceph_assert(match.size() == 2);
+      ceph_assert(match.size() == 3);
 
       if (match[1] == "user") {
 	return Principal::user(std::move(a->account),
@@ -1159,10 +1171,11 @@ ostream& print_array(ostream& m, Iterator begin, Iterator end) {
 }
 
 ostream& operator <<(ostream& m, const Condition& c) {
-  m << "{ " << condop_string(c.op) << ": { " << c.key;
+  m << "{ " << condop_string(c.op);
   if (c.ifexists) {
     m << "IfExists";
   }
+  m << ": { " << c.key;
   print_array(m, c.vals.cbegin(), c.vals.cend());
   return m << "}";
 }
@@ -1350,6 +1363,24 @@ const char* action_bit_string(uint64_t action) {
 
   case s3DeleteReplicationConfiguration:
     return "s3:DeleteReplicationConfiguration";
+
+  case s3PutObjectTagging:
+    return "s3:PutObjectTagging";
+
+  case s3PutObjectVersionTagging:
+    return "s3:PutObjectVersionTagging";
+
+  case s3GetObjectTagging:
+    return "s3:GetObjectTagging";
+
+  case s3GetObjectVersionTagging:
+    return "s3:GetObjectVersionTagging";
+
+  case s3DeleteObjectTagging:
+    return "s3:DeleteObjectTagging";
+
+  case s3DeleteObjectVersionTagging:
+    return "s3:DeleteObjectVersionTagging";
   }
   return "s3Invalid";
 }

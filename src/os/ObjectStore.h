@@ -1561,6 +1561,24 @@ public:
   virtual bool wants_journal() = 0;  //< prefers a journal
   virtual bool allows_journal() = 0; //< allows a journal
 
+  /**
+   * is_rotational
+   *
+   * Check whether store is backed by a rotational (HDD) or non-rotational
+   * (SSD) device.
+   *
+   * This must be usable *before* the store is mounted.
+   *
+   * @return true for HDD, false for SSD
+   */
+  virtual bool is_rotational() {
+    return true;
+  }
+
+  virtual string get_default_device_class() {
+    return is_rotational() ? "hdd" : "ssd";
+  }
+
   virtual bool can_sort_nibblewise() {
     return false;   // assume a backend cannot, unless it says otherwise
   }
@@ -1688,17 +1706,15 @@ public:
     uint64_t offset,
     size_t len,
     bufferlist& bl,
-    uint32_t op_flags = 0,
-    bool allow_eio = false) = 0;
+    uint32_t op_flags = 0) = 0;
    virtual int read(
      CollectionHandle &c,
      const ghobject_t& oid,
      uint64_t offset,
      size_t len,
      bufferlist& bl,
-     uint32_t op_flags = 0,
-     bool allow_eio = false) {
-     return read(c->get_cid(), oid, offset, len, bl, op_flags, allow_eio);
+     uint32_t op_flags = 0) {
+     return read(c->get_cid(), oid, offset, len, bl, op_flags);
    }
 
   /**
@@ -2008,6 +2024,8 @@ public:
   // DEBUG
   virtual void inject_data_error(const ghobject_t &oid) {}
   virtual void inject_mdata_error(const ghobject_t &oid) {}
+
+  virtual void compact() {}
 };
 WRITE_CLASS_ENCODER(ObjectStore::Transaction)
 WRITE_CLASS_ENCODER(ObjectStore::Transaction::TransactionData)

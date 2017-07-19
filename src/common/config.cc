@@ -12,36 +12,17 @@
  *
  */
 
-#include "auth/Auth.h"
-#include "common/ConfUtils.h"
 #include "common/ceph_argparse.h"
 #include "common/common_init.h"
 #include "common/config.h"
 #include "common/config_validators.h"
-#include "common/static_assert.h"
-#include "common/strtol.h"
-#include "common/version.h"
 #include "include/str_list.h"
-#include "include/types.h"
 #include "include/stringify.h"
-#include "msg/msg_types.h"
 #include "osd/osd_types.h"
 #include "common/errno.h"
 #include "common/hostname.h"
 
-#include "include/assert.h"
-
-#include <errno.h>
-#include <sstream>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-
-#include <type_traits>
-#include <utility>
 #include <boost/type_traits.hpp>
-#include <boost/utility/enable_if.hpp>
 
 /* Don't use standard Ceph logging in this file.
  * We can't use logging until it's initialized, and a lot of the necessary
@@ -57,10 +38,8 @@
 
 using std::map;
 using std::list;
-using std::multimap;
 using std::ostringstream;
 using std::pair;
-using std::set;
 using std::string;
 
 const char *CEPH_CONF_FILE_DEFAULT = "$data_dir/config, /etc/ceph/$cluster.conf, ~/.ceph/$cluster.conf, $cluster.conf"
@@ -624,6 +603,7 @@ int md_config_t::parse_option(std::vector<const char*>& args,
   }
 
   if (ret != 0 || !error_message.empty()) {
+    assert(option_name);
     if (oss) {
       *oss << "Parse error setting " << option_name << " to '"
            << val << "' using injectargs";
@@ -731,11 +711,11 @@ void md_config_t::call_all_observers()
 
     expand_all_meta();
 
-    for (obs_map_t::iterator r = observers.begin(); r != observers.end(); ++r) {
+    for (auto r = observers.begin(); r != observers.end(); ++r) {
       obs[r->second].insert(r->first);
     }
   }
-  for (std::map<md_config_obs_t*,std::set<std::string> >::iterator p = obs.begin();
+  for (auto p = obs.begin();
        p != obs.end();
        ++p) {
     p->first->handle_conf_change(this, p->second);
@@ -926,6 +906,10 @@ int md_config_t::_get_val(const char *key, std::string *value) const {
     ostringstream oss;
     if (bool *flag = boost::get<bool>(&config_value)) {
       oss << (*flag ? "true" : "false");
+    } else if (float *fp = boost::get<float>(&config_value)) {
+      oss << std::fixed << *fp ;
+    } else if (double *dp = boost::get<double>(&config_value)) {
+      oss << std::fixed << *dp ;
     } else {
       oss << config_value;
     }
@@ -942,29 +926,21 @@ int md_config_t::_get_val(const char *key, char **buf, int len) const
   if (!key)
     return -EINVAL;
 
-  string k(ConfFile::normalize_key_name(key));
-
-  config_value_t cval = _get_val(k.c_str());
-  if (!boost::get<invalid_config_value_t>(&cval)) {
-    ostringstream oss;
-    if (bool *flagp = boost::get<bool>(&cval)) {
-      oss << (*flagp ? "true" : "false");
-    } else {
-      oss << cval;
-    }
-    string str(oss.str());
-    int l = strlen(str.c_str()) + 1;
+  string val ;
+  if (!_get_val(key, &val)) {
+    int l = val.length() + 1;
     if (len == -1) {
       *buf = (char*)malloc(l);
       if (!*buf)
         return -ENOMEM;
-      strcpy(*buf, str.c_str());
+      strncpy(*buf, val.c_str(), l);
       return 0;
     }
-    snprintf(*buf, len, "%s", str.c_str());
+    snprintf(*buf, len, "%s", val.c_str());
     return (l > len) ? -ENAMETOOLONG : 0;
   }
 
+  string k(ConfFile::normalize_key_name(key));
   // subsys?
   for (int o = 0; o < subsys.get_num(); o++) {
     std::string as_option = "debug_" + subsys.get_name(o);

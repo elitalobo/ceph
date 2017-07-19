@@ -56,6 +56,10 @@ TracepointProvider::Traits osd_tracepoint_traits("libosd_tp.so",
                                                  "osd_tracing");
 TracepointProvider::Traits os_tracepoint_traits("libos_tp.so",
                                                 "osd_objectstore_tracing");
+#ifdef WITH_OSD_INSTRUMENT_FUNCTIONS
+TracepointProvider::Traits cyg_profile_traits("libcyg_profile_tp.so",
+                                                 "osd_function_tracing");
+#endif
 
 } // anonymous namespace
 
@@ -69,11 +73,12 @@ void handle_osd_signal(int signum)
 
 static void usage()
 {
-  cout << "usage: ceph-osd -i <osdid>\n"
+  cout << "usage: ceph-osd -i <ID> [flags]\n"
        << "  --osd-data PATH data directory\n"
        << "  --osd-journal PATH\n"
        << "                    journal file or block device\n"
        << "  --mkfs            create a [new] data directory\n"
+       << "  --mkkey           generate a new secret key. This is normally used in combination with --mkfs\n"
        << "  --convert-filestore\n"
        << "                    run any pending upgrade operations\n"
        << "  --flush-journal   flush all data out of journal\n"
@@ -579,6 +584,9 @@ flushjournal_out:
 
   TracepointProvider::initialize<osd_tracepoint_traits>(g_ceph_context);
   TracepointProvider::initialize<os_tracepoint_traits>(g_ceph_context);
+#ifdef WITH_OSD_INSTRUMENT_FUNCTIONS
+  TracepointProvider::initialize<cyg_profile_traits>(g_ceph_context);
+#endif
 
   MonClient mc(g_ceph_context);
   if (mc.build_initial_monmap() < 0)
@@ -589,6 +597,8 @@ flushjournal_out:
   if (global_init_preload_erasure_code(g_ceph_context) < 0)
     return -1;
 #endif
+
+  srand(time(NULL) + getpid());
 
   osd = new OSD(g_ceph_context,
                 store,

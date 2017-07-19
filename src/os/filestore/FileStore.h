@@ -94,6 +94,7 @@ enum {
   l_filestore_bytes,
   l_filestore_apply_latency,
   l_filestore_queue_transaction_latency_avg,
+  l_filestore_sync_pause_max_lat,
   l_filestore_last,
 };
 
@@ -481,6 +482,9 @@ public:
   bool needs_journal() override {
     return false;
   }
+
+  bool is_rotational() override;
+
   void dump_perf_counters(Formatter *f) override {
     f->open_object_section("perf_counters");
     logger->dump_formatted(f, false);
@@ -583,8 +587,7 @@ public:
     uint64_t offset,
     size_t len,
     bufferlist& bl,
-    uint32_t op_flags = 0,
-    bool allow_eio = false) override;
+    uint32_t op_flags = 0) override;
   int _do_fiemap(int fd, uint64_t offset, size_t len,
                  map<uint64_t, uint64_t> *m);
   int _do_seek_hole_data(int fd, uint64_t offset, size_t len,
@@ -637,6 +640,12 @@ public:
   set<ghobject_t> mdata_error_set; // getattr(),stat() will return -EIO
   void inject_data_error(const ghobject_t &oid) override;
   void inject_mdata_error(const ghobject_t &oid) override;
+
+  void compact() override {
+    assert(object_map);
+    object_map->compact();
+  }
+
   void debug_obj_on_delete(const ghobject_t &oid);
   bool debug_data_eio(const ghobject_t &oid);
   bool debug_mdata_eio(const ghobject_t &oid);
@@ -864,6 +873,7 @@ public:
   virtual int syncfs() = 0;
   virtual bool has_fiemap() = 0;
   virtual bool has_seek_data_hole() = 0;
+  virtual bool is_rotational() = 0;
   virtual int do_fiemap(int fd, off_t start, size_t len, struct fiemap **pfiemap) = 0;
   virtual int clone_range(int from, int to, uint64_t srcoff, uint64_t len, uint64_t dstoff) = 0;
   virtual int set_alloc_hint(int fd, uint64_t hint) = 0;

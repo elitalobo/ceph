@@ -13,8 +13,8 @@
 
 // Include this first to get python headers earlier
 #include "PyState.h"
+#include "Gil.h"
 
-#include <boost/tokenizer.hpp>
 #include "common/errno.h"
 #include "include/stringify.h"
 
@@ -29,47 +29,19 @@
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mgr
-
 #undef dout_prefix
-#define dout_prefix *_dout << "mgr[py] "
+#define dout_prefix *_dout << "mgr " << __func__ << " "
 
 // definition for non-const static member
 std::string PyModules::config_prefix;
-
-namespace {
-  PyObject* log_write(PyObject*, PyObject* args) {
-    char* m = nullptr;
-    if (PyArg_ParseTuple(args, "s", &m)) {
-      auto len = strlen(m);
-      if (len && m[len-1] == '\n') {
-	m[len-1] = '\0';
-      }
-      dout(4) << m << dendl;
-    }
-    Py_RETURN_NONE;
-  }
-
-  PyObject* log_flush(PyObject*, PyObject*){
-    Py_RETURN_NONE;
-  }
-
-  static PyMethodDef log_methods[] = {
-    {"write", log_write, METH_VARARGS, "write stdout and stderr"},
-    {"flush", log_flush, METH_VARARGS, "flush"},
-    {nullptr, nullptr, 0, nullptr}
-  };
-}
-
-#undef dout_prefix
-#define dout_prefix *_dout << "mgr " << __func__ << " "
 
 // constructor/destructor implementations cannot be in .h,
 // because ServeThread is still an "incomplete" type there
 
 PyModules::PyModules(DaemonStateIndex &ds, ClusterState &cs,
-	  MonClient &mc, Objecter &objecter_, Client &client_,
-	  Finisher &f)
-  : daemon_state(ds), cluster_state(cs), monc(mc),
+	  MonClient &mc, LogChannelRef clog_, Objecter &objecter_,
+          Client &client_, Finisher &f)
+  : daemon_state(ds), cluster_state(cs), monc(mc), clog(clog_),
     objecter(objecter_), client(client_), finisher(f),
     lock("PyModules")
 {}
@@ -86,7 +58,7 @@ void PyModules::dump_server(const std::string &hostname,
 
   for (const auto &i : dmc) {
     const auto &key = i.first;
-    const std::string str_type = ceph_entity_type_name(key.first);
+    const std::string &str_type = key.first;
     const std::string &svc_name = key.second;
 
     // TODO: pick the highest version, and make sure that
@@ -144,10 +116,12 @@ PyObject *PyModules::list_servers_python()
   return f.get();
 }
 
-PyObject *PyModules::get_metadata_python(std::string const &handle,
-    entity_type_t svc_type, const std::string &svc_id)
+PyObject *PyModules::get_metadata_python(
+  std::string const &handle,
+  const std::string &svc_name,
+  const std::string &svc_id)
 {
-  auto metadata = daemon_state.get(DaemonKey(svc_type, svc_id));
+  auto metadata = daemon_state.get(DaemonKey(svc_name, svc_id));
   PyFormatter f;
   f.dump_string("hostname", metadata->hostname);
   for (const auto &i : metadata->metadata) {
@@ -157,6 +131,18 @@ PyObject *PyModules::get_metadata_python(std::string const &handle,
   return f.get();
 }
 
+PyObject *PyModules::get_daemon_status_python(
+  std::string const &handle,
+  const std::string &svc_name,
+  const std::string &svc_id)
+{
+  auto metadata = daemon_state.get(DaemonKey(svc_name, svc_id));
+  PyFormatter f;
+  for (const auto &i : metadata->service_status) {
+    f.dump_string(i.first.c_str(), i.second);
+  }
+  return f.get();
+}
 
 PyObject *PyModules::get_python(const std::string &what)
 {
@@ -201,9 +187,17 @@ PyObject *PyModules::get_python(const std::string &what)
       }
     );
     return f.get();
+  } else if (what == "service_map") {
+    PyFormatter f;
+    cluster_state.with_servicemap(
+      [&f](const ServiceMap &service_map) {
+        service_map.dump(&f);
+      }
+    );
+    return f.get();
   } else if (what == "osd_metadata") {
     PyFormatter f;
-    auto dmc = daemon_state.get_by_type(CEPH_ENTITY_TYPE_OSD);
+    auto dmc = daemon_state.get_by_service("osd");
     for (const auto &i : dmc) {
       f.open_object_section(i.first.second.c_str());
       f.dump_string("hostname", i.second->hostname);
@@ -264,7 +258,7 @@ PyObject *PyModules::get_python(const std::string &what)
       cluster_state.with_pgmap(
           [&osd_map, &f](const PGMap &pg_map) {
         pg_map.dump_fs_stats(nullptr, &f, true);
-        pg_map.dump_pool_stats(osd_map, nullptr, &f, true);
+        pg_map.dump_pool_stats_full(osd_map, nullptr, &f, true);
       });
     });
     return f.get();
@@ -286,6 +280,12 @@ PyObject *PyModules::get_python(const std::string &what)
       assert(false);
     }
     f.dump_string("json", json.to_str());
+    return f.get();
+  } else if (what == "mgr_map") {
+    PyFormatter f;
+    cluster_state.with_mgrmap([&f](const MgrMap &mgr_map) {
+      mgr_map.dump(&f);
+    });
     return f.get();
   } else {
     derr << "Python module requested unknown data '" << what << "'" << dendl;
@@ -365,37 +365,12 @@ int PyModules::init()
   Mutex::Locker locker(lock);
 
   global_handle = this;
-  // namespace in config-key prefixed by "mgr/<id>/"
-  config_prefix = std::string(g_conf->name.get_type_str()) + "/" +
-	          g_conf->name.get_id() + "/";
+  // namespace in config-key prefixed by "mgr/"
+  config_prefix = std::string(g_conf->name.get_type_str()) + "/";
 
   // Set up global python interpreter
   Py_SetProgramName(const_cast<char*>(PYTHON_EXECUTABLE));
   Py_InitializeEx(0);
-
-  // Some python modules do not cope with an unpopulated argv, so lets
-  // fake one.  This step also picks up site-packages into sys.path.
-  const char *argv[] = {"ceph-mgr"};
-  PySys_SetArgv(1, (char**)argv);
-
-  if (g_conf->daemonize) {
-    auto py_logger = Py_InitModule("ceph_logger", log_methods);
-#if PY_MAJOR_VERSION >= 3
-    PySys_SetObject("stderr", py_logger);
-    PySys_SetObject("stdout", py_logger);
-#else
-    PySys_SetObject(const_cast<char*>("stderr"), py_logger);
-    PySys_SetObject(const_cast<char*>("stdout"), py_logger);
-#endif
-  }
-  // Populate python namespace with callable hooks
-  Py_InitModule("ceph_state", CephStateMethods);
-
-  // Configure sys.path to include mgr_module_path
-  std::string sys_path = std::string(Py_GetPath()) + ":" + get_site_packages()
-                         + ":" + g_conf->mgr_module_path;
-  dout(10) << "Computed sys.path '" << sys_path << "'" << dendl;
-  PySys_SetPath((char*)(sys_path.c_str()));
 
   // Let CPython know that we will be calling it back from other
   // threads in future.
@@ -403,26 +378,44 @@ int PyModules::init()
     PyEval_InitThreads();
   }
 
+  // Configure sys.path to include mgr_module_path
+  std::string sys_path = std::string(Py_GetPath()) + ":" + get_site_packages()
+                         + ":" + g_conf->mgr_module_path;
+  dout(10) << "Computed sys.path '" << sys_path << "'" << dendl;
+
+  // Drop the GIL and remember the main thread state (current
+  // thread state becomes NULL)
+  pMainThreadState = PyEval_SaveThread();
+
+  std::list<std::string> failed_modules;
+
   // Load python code
-  boost::tokenizer<> tok(g_conf->mgr_modules);
-  for(const auto& module_name : tok) {
+  set<string> ls;
+  cluster_state.with_mgrmap([&](const MgrMap& m) {
+      ls = m.modules;
+    });
+  for (const auto& module_name : ls) {
     dout(1) << "Loading python module '" << module_name << "'" << dendl;
-    auto mod = std::unique_ptr<MgrPyModule>(new MgrPyModule(module_name));
+    auto mod = std::unique_ptr<MgrPyModule>(new MgrPyModule(module_name, sys_path, pMainThreadState));
     int r = mod->load();
     if (r != 0) {
+      // Don't use handle_pyerror() here; we don't have the GIL
+      // or the right thread state (this is deliberate).
       derr << "Error loading module '" << module_name << "': "
         << cpp_strerror(r) << dendl;
-      derr << handle_pyerror() << dendl;
+      failed_modules.push_back(module_name);
       // Don't drop out here, load the other modules
     } else {
       // Success!
       modules[module_name] = std::move(mod);
     }
-  } 
+  }
 
-  // Drop the GIL
-  PyEval_SaveThread();
-  
+  if (!failed_modules.empty()) {
+    clog->error() << "Failed to load ceph-mgr modules: " << joinify(
+        failed_modules.begin(), failed_modules.end(), std::string(", "));
+  }
+
   return 0;
 }
 
@@ -438,14 +431,11 @@ public:
 
   void *entry() override
   {
-    PyGILState_STATE gstate;
-    gstate = PyGILState_Ensure();
     running = true;
 
+    // No need to acquire the GIL here; the module does it.
     dout(4) << "Entering thread for " << mod->get_name() << dendl;
     mod->serve();
-
-    PyGILState_Release(gstate);
 
     running = false;
     return nullptr;
@@ -480,7 +470,9 @@ void PyModules::shutdown()
     auto module = i.second.get();
     const auto& name = i.first;
     dout(10) << "waiting for module " << name << " to shutdown" << dendl;
+    lock.Unlock();
     module->shutdown();
+    lock.Lock();
     dout(10) << "module " << name << " shutdown" << dendl;
   }
 
@@ -495,7 +487,7 @@ void PyModules::shutdown()
 
   modules.clear();
 
-  PyGILState_Ensure();
+  PyEval_RestoreThread(pMainThreadState);
   Py_Finalize();
 
   // nobody needs me anymore.
@@ -558,6 +550,26 @@ bool PyModules::get_config(const std::string &handle,
   } else {
     return false;
   }
+}
+
+PyObject *PyModules::get_config_prefix(const std::string &handle,
+    const std::string &prefix) const
+{
+  PyThreadState *tstate = PyEval_SaveThread();
+  Mutex::Locker l(lock);
+  PyEval_RestoreThread(tstate);
+
+  const std::string base_prefix = config_prefix + handle + "/";
+  const std::string global_prefix = base_prefix + prefix;
+  dout(4) << __func__ << "prefix: " << global_prefix << dendl;
+
+  PyFormatter f;
+  for (auto p = config_cache.lower_bound(global_prefix);
+       p != config_cache.end() && p->first.find(global_prefix) == 0;
+       ++p) {
+    f.dump_string(p->first.c_str() + base_prefix.size(), p->second);
+  }
+  return f.get();
 }
 
 void PyModules::set_config(const std::string &handle,
@@ -633,7 +645,7 @@ void PyModules::log(const std::string &handle,
 
 PyObject* PyModules::get_counter_python(
     const std::string &handle,
-    entity_type_t svc_type,
+    const std::string &svc_name,
     const std::string &svc_id,
     const std::string &path)
 {
@@ -644,7 +656,7 @@ PyObject* PyModules::get_counter_python(
   PyFormatter f;
   f.open_array_section(path.c_str());
 
-  auto metadata = daemon_state.get(DaemonKey(svc_type, svc_id));
+  auto metadata = daemon_state.get(DaemonKey(svc_name, svc_id));
 
   // FIXME: this is unsafe, I need to either be inside DaemonStateIndex's
   // lock or put a lock on individual DaemonStates
@@ -661,8 +673,7 @@ PyObject* PyModules::get_counter_python(
       }
     } else {
       dout(4) << "Missing counter: '" << path << "' ("
-              << ceph_entity_type_name(svc_type) << "."
-              << svc_id << ")" << dendl;
+              << svc_name << "." << svc_id << ")" << dendl;
       dout(20) << "Paths are:" << dendl;
       for (const auto &i : metadata->perf_counters.instances) {
         dout(20) << i.first << dendl;
@@ -670,8 +681,7 @@ PyObject* PyModules::get_counter_python(
     }
   } else {
     dout(4) << "No daemon state for "
-              << ceph_entity_type_name(svc_type) << "."
-              << svc_id << ")" << dendl;
+              << svc_name << "." << svc_id << ")" << dendl;
   }
   f.close_section();
   return f.get();
@@ -690,3 +700,32 @@ PyObject *PyModules::get_context()
   return capsule;
 }
 
+static void _list_modules(
+  const std::string path,
+  std::set<std::string> *modules)
+{
+  DIR *dir = opendir(path.c_str());
+  if (!dir) {
+    return;
+  }
+  struct dirent *entry = NULL;
+  while ((entry = readdir(dir)) != NULL) {
+    string n(entry->d_name);
+    string fn = path + "/" + n;
+    struct stat st;
+    int r = ::stat(fn.c_str(), &st);
+    if (r == 0 && S_ISDIR(st.st_mode)) {
+      string initfn = fn + "/module.py";
+      r = ::stat(initfn.c_str(), &st);
+      if (r == 0) {
+	modules->insert(n);
+      }
+    }
+  }
+  closedir(dir);
+}
+
+void PyModules::list_modules(std::set<std::string> *modules)
+{
+  _list_modules(g_conf->mgr_module_path, modules);
+}

@@ -605,6 +605,15 @@ void librados::ObjectReadOperation::cache_evict()
   o->cache_evict();
 }
 
+void librados::ObjectWriteOperation::set_redirect(const std::string& tgt_obj, 
+						  const IoCtx& tgt_ioctx,
+						  uint64_t tgt_version)
+{
+  ::ObjectOperation *o = &impl->o;
+  o->set_redirect(object_t(tgt_obj), tgt_ioctx.io_ctx_impl->snap_seq,
+			  tgt_ioctx.io_ctx_impl->oloc, tgt_version);
+}
+
 void librados::ObjectWriteOperation::tmap_put(const bufferlist &bl)
 {
   ::ObjectOperation *o = &impl->o;
@@ -1472,6 +1481,8 @@ static int translate_flags(int flags)
     op_flags |= CEPH_OSD_FLAG_FULL_TRY;
   if (flags & librados::OPERATION_FULL_FORCE)
     op_flags |= CEPH_OSD_FLAG_FULL_FORCE;
+  if (flags & librados::OPERATION_IGNORE_REDIRECT)
+    op_flags |= CEPH_OSD_FLAG_IGNORE_REDIRECT;
 
   return op_flags;
 }
@@ -2333,6 +2344,20 @@ int librados::Rados::conf_get(const char *option, std::string &val)
   val = str;
   free(str);
   return 0;
+}
+
+int librados::Rados::service_daemon_register(
+  const std::string& service,  ///< service name (e.g., 'rgw')
+  const std::string& name,     ///< daemon name (e.g., 'gwfoo')
+  const std::map<std::string,std::string>& metadata) ///< static metadata about daemon
+{
+  return client->service_daemon_register(service, name, metadata);
+}
+
+int librados::Rados::service_daemon_update_status(
+  const std::map<std::string,std::string>& status)
+{
+  return client->service_daemon_update_status(status);
 }
 
 int librados::Rados::pool_create(const char *name)
@@ -3364,8 +3389,18 @@ extern "C" int rados_monitor_log(rados_t cluster, const char *level, rados_log_c
 {
   tracepoint(librados, rados_monitor_log_enter, cluster, level, cb, arg);
   librados::RadosClient *client = (librados::RadosClient *)cluster;
-  int retval = client->monitor_log(level, cb, arg);
+  int retval = client->monitor_log(level, cb, nullptr, arg);
   tracepoint(librados, rados_monitor_log_exit, retval);
+  return retval;
+}
+
+extern "C" int rados_monitor_log2(rados_t cluster, const char *level,
+				  rados_log_callback2_t cb, void *arg)
+{
+  tracepoint(librados, rados_monitor_log2_enter, cluster, level, cb, arg);
+  librados::RadosClient *client = (librados::RadosClient *)cluster;
+  int retval = client->monitor_log(level, nullptr, cb, arg);
+  tracepoint(librados, rados_monitor_log2_exit, retval);
   return retval;
 }
 

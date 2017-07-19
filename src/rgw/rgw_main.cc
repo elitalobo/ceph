@@ -26,6 +26,7 @@
 #include "common/safe_io.h"
 #include "include/compat.h"
 #include "include/str_list.h"
+#include "include/stringify.h"
 #include "rgw_common.h"
 #include "rgw_rados.h"
 #include "rgw_user.h"
@@ -182,6 +183,12 @@ static RGWRESTMgr *set_logging(RGWRESTMgr *mgr)
   return mgr;
 }
 
+static RGWRESTMgr *rest_filter(RGWRados *store, int dialect, RGWRESTMgr *orig)
+{
+  RGWSyncModuleInstanceRef sync_module = store->get_sync_module();
+  return sync_module->get_rest_filter(dialect, orig);
+}
+
 RGWRealmReloader *preloader = NULL;
 
 static void reloader_handler(int signum)
@@ -333,7 +340,7 @@ int main(int argc, const char **argv)
 
   RGWRados *store = RGWStoreManager::get_storage(g_ceph_context,
       g_conf->rgw_enable_gc_threads, g_conf->rgw_enable_lc_threads, g_conf->rgw_enable_quota_threads,
-      g_conf->rgw_run_sync_thread);
+      g_conf->rgw_run_sync_thread, g_conf->rgw_dynamic_resharding);
   if (!store) {
     mutex.Lock();
     init_timer.cancel_all_events();
@@ -377,7 +384,8 @@ int main(int argc, const char **argv)
   const bool swift_at_root = g_conf->rgw_swift_url_prefix == "/";
   if (apis_map.count("s3") > 0 || s3website_enabled) {
     if (! swift_at_root) {
-      rest.register_default_mgr(set_logging(new RGWRESTMgr_S3(s3website_enabled)));
+      rest.register_default_mgr(set_logging(rest_filter(store, RGW_REST_S3,
+                                                        new RGWRESTMgr_S3(s3website_enabled))));
     } else {
       derr << "Cannot have the S3 or S3 Website enabled together with "
            << "Swift API placed in the root of hierarchy" << dendl;
@@ -401,7 +409,8 @@ int main(int argc, const char **argv)
 
     if (! swift_at_root) {
       rest.register_resource(g_conf->rgw_swift_url_prefix,
-                          set_logging(swift_resource));
+                          set_logging(rest_filter(store, RGW_REST_SWIFT,
+                                                  swift_resource)));
     } else {
       if (store->get_zonegroup().zones.size() > 1) {
         derr << "Placing Swift API in the root of URL hierarchy while running"
@@ -462,15 +471,21 @@ int main(int argc, const char **argv)
   register_async_signal_handler(SIGUSR1, handle_sigterm);
   sighandler_alrm = signal(SIGALRM, godown_alarm);
 
+  map<string, string> service_map_meta;
+  service_map_meta["pid"] = stringify(getpid());
+
   list<RGWFrontend *> fes;
 
+  int fe_count = 0;
+
   for (multimap<string, RGWFrontendConfig *>::iterator fiter = fe_map.begin();
-       fiter != fe_map.end(); ++fiter) {
+       fiter != fe_map.end(); ++fiter, ++fe_count) {
     RGWFrontendConfig *config = fiter->second;
     string framework = config->get_framework();
     RGWFrontend *fe = NULL;
 
     if (framework == "civetweb" || framework == "mongoose") {
+      framework = "civetweb";
       std::string uri_prefix;
       config->get_val("prefix", "", &uri_prefix);
 
@@ -501,6 +516,7 @@ int main(int argc, const char **argv)
 #endif /* WITH_RADOSGW_BEAST_FRONTEND */
 #if defined(WITH_RADOSGW_FCGI_FRONTEND)
     else if (framework == "fastcgi" || framework == "fcgi") {
+      framework = "fastcgi";
       std::string uri_prefix;
       config->get_val("prefix", "", &uri_prefix);
       RGWProcessEnv fcgi_pe = { store, &rest, olog, 0, uri_prefix, auth_registry };
@@ -508,6 +524,9 @@ int main(int argc, const char **argv)
       fe = new RGWFCGXFrontend(fcgi_pe, config);
     }
 #endif /* WITH_RADOSGW_FCGI_FRONTEND */
+
+    service_map_meta["frontend_type#" + stringify(fe_count)] = framework;
+    service_map_meta["frontend_config#" + stringify(fe_count)] = config->get_config();
 
     if (fe == NULL) {
       dout(0) << "WARNING: skipping unknown framework: " << framework << dendl;
@@ -529,10 +548,18 @@ int main(int argc, const char **argv)
     fes.push_back(fe);
   }
 
+  r = store->register_to_service_map("rgw", service_map_meta);
+  if (r < 0) {
+    derr << "ERROR: failed to register to service map: " << cpp_strerror(-r) << dendl;
+
+    /* ignore error */
+  }
+
+
   // add a watcher to respond to realm configuration changes
   RGWPeriodPusher pusher(store);
   RGWFrontendPauser pauser(fes, &pusher);
-  RGWRealmReloader reloader(store, &pauser);
+  RGWRealmReloader reloader(store, service_map_meta, &pauser);
 
   preloader = &reloader;
 

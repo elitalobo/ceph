@@ -40,6 +40,7 @@ function TEST_osd_pool_get_set() {
 
     setup $dir || return 1
     run_mon $dir a || return 1
+    ceph osd pool create $TEST_POOL 8
 
     local flag
     for flag in nodelete nopgchange nosizechange write_fadvise_dontneed noscrub nodeep-scrub; do
@@ -122,7 +123,7 @@ function TEST_mon_add_to_single_mon() {
     # wait for the quorum
     timeout 120 ceph -s > /dev/null || return 1
     local num_mons
-    num_mons=$(ceph mon dump --format=xml 2>/dev/null | $XMLSTARLET sel -t -v "count(//mons/mon)") || return 1
+    num_mons=$(ceph mon dump --format=json 2>/dev/null | jq ".mons | length") || return 1
     [ $num_mons == 2 ] || return 1
     # no reason to take more than 120 secs to get this submitted
     timeout 120 ceph mon add b $MONB || return 1
@@ -150,36 +151,6 @@ function TEST_no_segfault_for_bad_keyring() {
     teardown $dir || return 1
 }
 
-function jq_success() {
-  input="$1"
-  filter="$2"
-  expects="\"$3\""
-
-  in_escaped=$(printf %s "$input" | sed "s/'/'\\\\''/g")
-  filter_escaped=$(printf %s "$filter" | sed "s/'/'\\\\''/g")
-
-  ret=$(echo "$in_escaped" | jq "$filter_escaped")
-  if [[ "$ret" == "true" ]]; then
-    return 0
-  elif [[ -n "$expects" ]]; then
-    if [[ "$ret" == "$expects" ]]; then
-      return 0
-    fi
-  fi
-  return 1
-  input=$1
-  filter=$2
-  expects="$3"
-
-  ret="$(echo $input | jq \"$filter\")"
-  if [[ "$ret" == "true" ]]; then
-    return 0
-  elif [[ -n "$expects" && "$ret" == "$expects" ]]; then
-    return 0
-  fi
-  return 1
-}
-
 function TEST_mon_features() {
     local dir=$1
     setup $dir || return 1
@@ -192,21 +163,12 @@ function TEST_mon_features() {
     CEPH_ARGS="--fsid=$fsid --auth-supported=none "
     CEPH_ARGS+="--mon-initial-members=a,b,c "
     CEPH_ARGS+="--mon-host=$MONA,$MONB,$MONC "
+    CEPH_ARGS+="--mon-debug-no-initial-persistent-features "
+    CEPH_ARGS+="--mon-debug-no-require-luminous "
 
     run_mon $dir a --public-addr $MONA || return 1
     run_mon $dir b --public-addr $MONB || return 1
     timeout 120 ceph -s > /dev/null || return 1
-
-    # NOTE:
-    # jq only support --exit-status|-e from version 1.4 forwards, which makes
-    # returning on error waaaay prettier and straightforward.
-    # However, the current automated upstream build is running with v1.3,
-    # which has no idea what -e is. Hence the convoluted error checking we
-    # need. Sad.
-    # The next time someone changes this code, please check if v1.4 is now
-    # a thing, and, if so, please change these to use -e. Thanks.
-
-    # jq '.all.supported | select([.[] == "foo"] | any)'
 
     # expect monmap to contain 3 monitors (a, b, and c)
     jqinput="$(ceph mon_status --format=json 2>/dev/null)"
@@ -229,9 +191,9 @@ function TEST_mon_features() {
     jqfilter='.monmap.features.optional | length == 0'
     jq_success "$jqinput" "$jqfilter" || return 1
 
-    # validate 'mon feature list'
+    # validate 'mon feature ls'
 
-    jqinput="$(ceph mon feature list --format=json 2>/dev/null)"
+    jqinput="$(ceph mon feature ls --format=json 2>/dev/null)"
     # 'kraken' and 'luminous' are supported
     jqfilter='.all.supported[] | select(. == "kraken")'
     jq_success "$jqinput" "$jqfilter" "kraken" || return 1

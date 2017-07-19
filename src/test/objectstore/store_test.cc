@@ -5744,11 +5744,11 @@ TEST_P(StoreTestSpecificAUSize, TooManyBlobsTest) {
 #if defined(HAVE_LIBAIO)
 void get_mempool_stats(uint64_t* total_bytes, uint64_t* total_items)
 {
-  uint64_t onode_allocated = mempool::bluestore_meta_onode::allocated_bytes();
-  uint64_t other_allocated = mempool::bluestore_meta_other::allocated_bytes();
+  uint64_t onode_allocated = mempool::bluestore_cache_onode::allocated_bytes();
+  uint64_t other_allocated = mempool::bluestore_cache_other::allocated_bytes();
 
-  uint64_t onode_items = mempool::bluestore_meta_onode::allocated_items();
-  uint64_t other_items = mempool::bluestore_meta_other::allocated_items();
+  uint64_t onode_items = mempool::bluestore_cache_onode::allocated_items();
+  uint64_t other_items = mempool::bluestore_cache_other::allocated_items();
   cout << "onode(" << onode_allocated << "/" << onode_items
        << ") other(" << other_allocated << "/" << other_items
        << ")" << std::endl;
@@ -5765,7 +5765,8 @@ TEST_P(StoreTestSpecificAUSize, OnodeSizeTracking) {
   StartDeferred(block_size);
   g_conf->set_val("bluestore_compression_mode", "none");
   g_conf->set_val("bluestore_csum_type", "none");
-  g_conf->set_val("bluestore_cache_size", "400000000");
+  g_conf->set_val("bluestore_cache_size_hdd", "400000000");
+  g_conf->set_val("bluestore_cache_size_ssd", "400000000");
   g_conf->apply_changes(NULL);
 
   ObjectStore::Sequencer osr("test");
@@ -5853,7 +5854,8 @@ TEST_P(StoreTestSpecificAUSize, OnodeSizeTracking) {
     r = apply_transaction(store, &osr, std::move(t));
     ASSERT_EQ(r, 0);
   }
-  g_ceph_context->_conf->set_val("bluestore_cache_size", "4000000");
+  g_ceph_context->_conf->set_val("bluestore_cache_size_hdd", "4000000");
+  g_ceph_context->_conf->set_val("bluestore_cache_size_ssd", "4000000");
   g_conf->set_val("bluestore_compression_mode", "none");
   g_conf->set_val("bluestore_csum_type", "crc32c");
 
@@ -6656,7 +6658,8 @@ int main(int argc, char **argv) {
   g_ceph_context->_conf->set_val("bluestore_max_alloc_size", "196608");
 
   // set small cache sizes so we see trimming during Synthetic tests
-  g_ceph_context->_conf->set_val("bluestore_cache_size", "4000000");
+  g_ceph_context->_conf->set_val("bluestore_cache_size_hdd", "4000000");
+  g_ceph_context->_conf->set_val("bluestore_cache_size_ssd", "4000000");
 
   // very short *_max prealloc so that we fall back to async submits
   g_ceph_context->_conf->set_val("bluestore_blobid_prealloc", "10");

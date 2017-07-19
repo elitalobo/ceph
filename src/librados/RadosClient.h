@@ -74,8 +74,13 @@ private:
 
   version_t log_last_version;
   rados_log_callback_t log_cb;
+  rados_log_callback2_t log_cb2;
   void *log_cb_arg;
   string log_watch;
+
+  bool service_daemon = false;
+  string daemon_name, service_name;
+  map<string,string> daemon_metadata;
 
   int wait_for_osdmap();
 
@@ -144,11 +149,19 @@ public:
 	         bufferlist *poutbl, string *prs);
 
   void handle_log(MLog *m);
-  int monitor_log(const string& level, rados_log_callback_t cb, void *arg);
+  int monitor_log(const string& level, rados_log_callback_t cb,
+		  rados_log_callback2_t cb2, void *arg);
 
   void get();
   bool put();
   void blacklist_self(bool set);
+
+  int service_daemon_register(
+    const std::string& service,  ///< service name (e.g., 'rgw')
+    const std::string& name,     ///< daemon name (e.g., 'gwfoo')
+    const std::map<std::string,std::string>& metadata); ///< static metadata about daemon
+  int service_daemon_update_status(
+    const std::map<std::string,std::string>& status);
 };
 
 #endif

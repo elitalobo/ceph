@@ -11,16 +11,18 @@
  * Foundation.  See file COPYING.
  */
 
+#ifndef CEPH_MGRMONITOR_H
+#define CEPH_MGRMONITOR_H
 
 #include "include/Context.h"
 #include "MgrMap.h"
 #include "PaxosService.h"
 
-
-class MgrMonitor : public PaxosService
+class MgrMonitor: public PaxosService
 {
   MgrMap map;
   MgrMap pending_map;
+  bool ever_had_active_mgr = false;
 
   utime_t first_seen_inactive;
 
@@ -41,10 +43,13 @@ class MgrMonitor : public PaxosService
 
   bool check_caps(MonOpRequestRef op, const uuid_d& fsid);
 
+  health_status_t should_warn_about_mgr_down();
+
 public:
   MgrMonitor(Monitor *mn, Paxos *p, const string& service_name)
     : PaxosService(mn, p, service_name)
   {}
+  ~MgrMonitor() override {}
 
   void init() override;
   void on_shutdown() override;
@@ -74,6 +79,8 @@ public:
   void send_digests();
 
   void on_active() override;
+  void on_restart() override;
+
   void get_health(list<pair<health_status_t,string> >& summary,
 		  list<pair<health_status_t,string> > *detail,
 		  CephContext *cct) const override;
@@ -84,3 +91,4 @@ public:
   friend class C_Updated;
 };
 
+#endif

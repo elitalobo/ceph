@@ -1,9 +1,10 @@
 #include "rgw_rados.h"
 #include "rgw_coroutine.h"
-#include "rgw_boost_asio_yield.h"
 #include "rgw_cr_rados.h"
 
 #include "cls/lock/cls_lock_client.h"
+
+#include <boost/asio/yield.hpp>
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
@@ -219,13 +220,6 @@ RGWRadosSetOmapKeysCR::RGWRadosSetOmapKeysCR(RGWRados *_store,
   s << "]";
 }
 
-RGWRadosSetOmapKeysCR::~RGWRadosSetOmapKeysCR()
-{
-  if (cn) {
-    cn->put();
-  }
-}
-
 int RGWRadosSetOmapKeysCR::send_request()
 {
   int r = store->get_raw_obj_ref(obj, &ref);
@@ -240,7 +234,6 @@ int RGWRadosSetOmapKeysCR::send_request()
   op.omap_set(entries);
 
   cn = stack->create_completion_notifier();
-  cn->get();
   return ref.ioctx.aio_operate(ref.oid, cn->completion(), &op);
 }
 
@@ -263,10 +256,6 @@ RGWRadosGetOmapKeysCR::RGWRadosGetOmapKeysCR(RGWRados *_store,
                                                 obj(_obj), cn(NULL)
 {
   set_description() << "set omap keys dest=" << obj << " marker=" << marker;
-}
-
-RGWRadosGetOmapKeysCR::~RGWRadosGetOmapKeysCR()
-{
 }
 
 int RGWRadosGetOmapKeysCR::send_request() {
@@ -295,10 +284,6 @@ RGWRadosRemoveOmapKeysCR::RGWRadosRemoveOmapKeysCR(RGWRados *_store,
   set_description() << "remove omap keys dest=" << obj << " keys=" << keys;
 }
 
-RGWRadosRemoveOmapKeysCR::~RGWRadosRemoveOmapKeysCR()
-{
-}
-
 int RGWRadosRemoveOmapKeysCR::send_request() {
   int r = store->get_raw_obj_ref(obj, &ref);
   if (r < 0) {
@@ -313,6 +298,15 @@ int RGWRadosRemoveOmapKeysCR::send_request() {
 
   cn = stack->create_completion_notifier();
   return ref.ioctx.aio_operate(ref.oid, cn->completion(), &op);
+}
+
+int RGWRadosRemoveOmapKeysCR::request_complete()
+{
+  int r = cn->completion()->get_return_value();
+
+  set_status() << "request complete; ret=" << r;
+
+  return r;
 }
 
 RGWRadosRemoveCR::RGWRadosRemoveCR(RGWRados *store, const rgw_raw_obj& obj)
@@ -542,7 +536,8 @@ int RGWAsyncFetchRemoteObj::_send_request()
                        NULL, /* string *ptag, */
                        NULL, /* string *petag, */
                        NULL, /* void (*progress_cb)(off_t, void *), */
-                       NULL); /* void *progress_data*); */
+                       NULL, /* void *progress_data*); */
+                       zones_trace); 
 
   if (r < 0) {
     ldout(store->ctx(), 0) << "store->fetch_remote_obj() returned r=" << r << dendl;
@@ -645,6 +640,7 @@ int RGWAsyncRemoveObj::_send_request()
   del_op.params.obj_owner.set_name(owner_display_name);
   del_op.params.mtime = timestamp;
   del_op.params.high_precision_time = true;
+  del_op.params.zones_trace = zones_trace;
 
   ret = del_op.delete_obj();
   if (ret < 0) {
@@ -689,19 +685,11 @@ RGWRadosTimelogAddCR::RGWRadosTimelogAddCR(RGWRados *_store, const string& _oid,
   entries.push_back(entry);
 }
 
-RGWRadosTimelogAddCR::~RGWRadosTimelogAddCR()
-{
-  if (cn) {
-    cn->put();
-  }
-}
-
 int RGWRadosTimelogAddCR::send_request()
 {
   set_status() << "sending request";
 
   cn = stack->create_completion_notifier();
-  cn->get();
   return store->time_log_add(oid, entries, cn->completion(), true);
 }
 
@@ -729,19 +717,11 @@ RGWRadosTimelogTrimCR::RGWRadosTimelogTrimCR(RGWRados *store,
       << " from_marker=" << from_marker << " to_marker=" << to_marker;
 }
 
-RGWRadosTimelogTrimCR::~RGWRadosTimelogTrimCR()
-{
-  if (cn) {
-    cn->put();
-  }
-}
-
 int RGWRadosTimelogTrimCR::send_request()
 {
   set_status() << "sending request";
 
   cn = stack->create_completion_notifier();
-  cn->get();
   return store->time_log_trim(oid, start_time, end_time, from_marker,
                               to_marker, cn->completion());
 }
